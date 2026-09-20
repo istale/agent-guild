@@ -162,6 +162,9 @@ async def serve_tickets(client: RoomClient, card, tickets: list[dict],
         seen[room_id] = max([u["seq"] for u in state["utterances"]]
                             or [seen[room_id]])
         for u in state["utterances"]:
+            if u["kind"] == "error" and u["to"] == card.name:
+                await apologise(client, room_id, u)
+                continue
             if u["kind"] != "say":
                 continue
             if u["author_owner"] == "external":
@@ -210,6 +213,17 @@ async def handle_customer(client: RoomClient, room_id: str, card, u: dict,
         to=name, status="waiting")
     await client.say(room_id, "I am checking this with the team that owns it — "
                               "one moment.")
+
+
+async def apologise(client: RoomClient, room_id: str, u: dict) -> None:
+    """An internal agent could not answer. The customer gets a plain sentence,
+    never the underlying error, and a person is put on the ticket."""
+    print(f"internal failure in {room_id}: {u['text'][:80]}")
+    await client.say(
+        room_id,
+        "I could not reach the team that owns this. I have passed it to a "
+        "colleague and we will come back to you.",
+        status="waiting", flag_human=True)
 
 
 async def relay_to_customer(client: RoomClient, room_id: str, u: dict) -> None:

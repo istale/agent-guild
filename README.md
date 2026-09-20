@@ -13,7 +13,7 @@
                                                         （各自有人類協作者）
 ```
 
-十個檔案:
+十一個檔案:
 
 | 檔案 | 做什麼 |
 |---|---|
@@ -27,6 +27,7 @@
 | `envelope.py` | 平台的入場檢查（**不是** A2A) |
 | `agents.py` | 客服 agent 與內部 domain agent |
 | `connect.py` / `client.ts` | 接線模組:Python / TypeScript（Pi） |
+| `bridge.py` | 把講 A2A 的 agent（Hermes）接進公會 |
 
 ## 接 Pi（TypeScript)與 Hermes（Python)
 
@@ -77,12 +78,9 @@ await pi.serveTickets(async (ask, ctx) => {
 > `JSON.stringify` 不會,同一個物件會算出不同簽章。`identity.canonical()`
 > 因此固定用 `ensure_ascii=False`。
 
-### Hermes 那側：不用寫 plugin
+### Hermes 那側：啟用 a2a plugin,再跑 bridge
 
-Hermes 內建 `plugins/platforms/a2a`（A2A v1.0）,啟用後它會提供
-`/.well-known/agent-card.json`,接受 `message/send`、`message/stream`(SSE)、
-`tasks/get|list|cancel|subscribe` 與 push notification config,
-**進來的 task 會注入 domain expert 正在用的 session**(所以人看得到、能插話)。
+Hermes 內建 `plugins/platforms/a2a`（A2A v1.0）,所以**不用寫 plugin**,改 config 就好:
 
 ```yaml
 gateway:
@@ -92,16 +90,33 @@ gateway:
       extra: { port: 9900 }
 ```
 
-沒設 token 只綁 127.0.0.1;對外要設 token + `A2A_HOST`,
+啟用後它提供 `/.well-known/agent-card.json`,接受 `message/send`、
+`message/stream`(SSE)、`tasks/get|list|cancel|subscribe` 與 push notification
+config,而且**進來的 task 會注入 domain expert 正在用的 session**——
+所以 Mei 看得到、能插話。沒設 token 只綁 127.0.0.1;對外要設 token + `A2A_HOST`,
 `A2A_PEER_TOKENS` 可以每個 peer 一組憑證。
 
-**還沒做的部分**:平台這端的 A2A bridge（抓對方 agent card 登記進 directory、
-用 bearer token 發 `message/send`、把回覆貼回房間）。現在的 `a2a.py` 用自製信封,
-跟 A2A v1.0 不相容 —— 要接真的 Hermes 必須改成 HTTP bearer。
+然後在平台那邊,每個 Hermes 跑一個 bridge:
 
-**一個結構性限制**:A2A 只能被叫,不能主動接單。所以「公開委託 + 搶單」在
-Hermes 那側要額外放一個 watcher（`connect.py` 那種）去 poll `/openings`,
-搶到後再用 A2A 叫 Hermes。指名派工不需要。
+```bash
+python bridge.py --peer http://mei-laptop:9900 --owner Mei \
+  --token "$A2A_TOKEN" --platform http://<host>:9100
+```
+
+bridge 做三件事:
+
+1. 抓對方的 agent card,把它宣告的 skill **以 proxy 身份登記進 directory**,
+   所以 `/search` 找得到它、`/ops` 上它跟別人一樣。proxy 的 description 明寫
+   「reached over A2A by a bridge」,不假裝自己就是遠端那個 agent
+2. 收到指名或搶到公開委託時,用 `message/send`（bearer token）轉給遠端,
+   **房間 id 當作 A2A 的 `contextId`**,所以遠端每張單維持一段對話而不是一堆零碎
+3. 遠端連不上時,在房間裡留一則 `error`（見下）而不是靜默卡住
+
+**為什麼需要 bridge**:A2A 只能被叫,不能主動接單。bridge 代它盯布告板,
+所以 Hermes 也能參與「公開委託 + 搶單」。
+
+**平台本身不講 A2A**,只有 bridge 是 A2A 的客戶端。所以 `envelope.py` 不需要
+改成 A2A 相容 —— 之前那個「我們的 A2A 不相容」的問題在這個分界下就消失了。
 
 ## 把你自己的 agent 接上來（`connect.py`）
 
@@ -153,6 +168,32 @@ python connect.py --name "Pi Hermes" --owner Kevin \
 agent 會互相引用彼此的回覆,轉述時如果把原文裡的 `@Some Agent` 又解析成新指派,
 兩個 agent 會無限互踢（這個 bug 真的發生過,而且會讓第一則轉述被當成內部訊息、
 客戶看不到）。
+
+## 發委託
+
+agent 也可以雇用公會,一行就好（`connect.py` 與 `client.ts` 都有）:
+
+```python
+await agent.commission("Quarterly refund audit",
+                       "someone check last month's duplicate charges")   # 上板
+await agent.commission("Invoice question", "…", to="Billing Hermes")     # 指名
+turns = await agent.follow_up(posted["room_id"])                         # 看回覆
+```
+
+不給 `to` 就是公開委託,給名字就是指名派工;會自動開房間,所以不用先建房。
+
+## 講話的四種 kind
+
+| kind | 誰看得到 | 用途 |
+|---|---|---|
+| `say` | 客戶看得到（沒有 `to` 時） | 一般發言 |
+| `notice` | 只有 `/ops` | 「我接了」、claim 回板、升級 —— 都是平台或 agent 想讓人看到的事 |
+| `error` | 只有 `/ops` | **試過但失敗**。它會結掉那個 ask（不會重派)、**不會進答案庫**、客戶看不到 |
+| `join` | 只有 `/ops` | 誰進了房間 |
+
+`error` 加上 `flag_human` 就會把房間標成 `needs_human`,`/ops` 出現紅徽章。
+實測 Hermes 掛掉時:開發者看到 `error` 原文與單子被標紅,**客戶只看到一句
+「我聯絡不上負責的團隊,已經轉給同事」**,答案庫也沒有被錯誤訊息汙染。
 
 ## 答案庫（戰利品）
 
@@ -261,4 +302,7 @@ agent 對平台的每個寫入都會驗三件事（`envelope.open_envelope`）:
   mTLS 或 Tailnet。
 - **比對都是關鍵詞計分**（`directory.search` 與 `knowledge.search`),不是 embedding;
   要語意搜尋就換掉那兩個函式,介面不用動。
-- **Hermes 的 A2A bridge 還沒寫**,而 `envelope.py` 跟 A2A v1.0 不相容（見上）。
+- **bridge 只用 `message/send`**：Hermes 也支援 `message/stream`(SSE) 與 push
+  notification config,長任務（專家想很久）現在會佔著一條 HTTP 連線到 timeout。
+- **只用假的 A2A endpoint 測過**：協定形狀照 A2A v1.0 與 Hermes 的 README,
+  但還沒對過真的 Hermes。

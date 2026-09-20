@@ -34,6 +34,11 @@ from identity import Identity
 SAY = "say"          # ordinary turn
 JOIN = "join"        # an agent entered the room
 NOTICE = "notice"    # something the platform or an agent wants humans to see
+ERROR = "error"      # an agent tried and could not: closes the ask without
+                     # becoming an answer, and never enters the answer log
+
+# Kinds that settle an ask, so the same work is not harded out twice.
+SETTLES = {SAY, NOTICE, ERROR}
 
 # An ask addressed to ANYONE qualified, instead of to one named agent: the
 # quest board. First agent to claim it owns it.
@@ -193,9 +198,10 @@ class RoomStore:
         return room
 
     def post(self, room_id: str, card: AgentCard, text: str, *, kind: str = SAY,
-             to: str = "", status: str = "") -> Utterance:
+             to: str = "", status: str = "", flag_human: bool = False) -> Utterance:
         return self._append(
             room_id, text, kind=kind, to=to, status=status,
+            flag_human=flag_human,
             author_did=card.did, author_name=card.name,
             author_owner=(card.owner or {}).get("label", "unknown"))
 
@@ -210,7 +216,8 @@ class RoomStore:
 
     def _append(self, room_id: str, text: str, *, author_did: str,
                 author_name: str, author_owner: str, kind: str = SAY,
-                to: str = "", status: str = "") -> Utterance:
+                to: str = "", status: str = "",
+                flag_human: bool = False) -> Utterance:
         room = self.get(room_id)
         # Only a human's @mention is parsed out of the text. An agent must name
         # its addressee explicitly, because agents quote each other: a relayed
@@ -227,6 +234,8 @@ class RoomStore:
         room.utterances.append(utterance)
         if status:
             room.status = status
+        if flag_human:
+            room.needs_human, room.priority = True, "high"
         self._file_knowledge(room, utterance)
         self._wake()
         return utterance
@@ -330,9 +339,11 @@ class RoomStore:
                 claim = room.claims.get(u.utterance_id) or {}
                 if u.to != name and claim.get("agent") != name:
                     continue
-                answered = any(x.seq > u.seq and x.author_name == name
-                               for x in room.utterances)
-                if not answered:
+                # A notice ("X is on it") settles the ask too, so a slow agent
+                # is not handed the same work again on the next poll.
+                settled = any(x.seq > u.seq and x.author_name == name
+                              and x.kind in SETTLES for x in room.utterances)
+                if not settled:
                     pending.append({"room": room.summary(),
                                     "utterance": u.to_dict()})
                 break
@@ -438,7 +449,8 @@ def post_utterance(room_id: str, envelope: dict = Body(...)) -> dict:
         raise HTTPException(403, "join the room before speaking")
     return store.post(room_id, card, text, kind=params.get("kind", SAY),
                       to=params.get("to", ""),
-                      status=params.get("status", "")).to_dict()
+                      status=params.get("status", ""),
+                      flag_human=bool(params.get("flag_human"))).to_dict()
 
 
 # ------------------------------------------------------- reading
@@ -558,10 +570,11 @@ class RoomClient:
         return await self._post(f"/rooms/{room_id}/join", "room/join", {})
 
     async def say(self, room_id: str, text: str, *, to: str = "",
-                  kind: str = SAY, status: str = "") -> dict:
+                  kind: str = SAY, status: str = "",
+                  flag_human: bool = False) -> dict:
         return await self._post(f"/rooms/{room_id}/utterances", "room/post",
                                 {"text": text, "to": to, "kind": kind,
-                                 "status": status})
+                                 "status": status, "flag_human": flag_human})
 
     async def read(self, room_id: str, since: int = 0, wait: float = 0.0,
                    view: str = "full") -> dict:

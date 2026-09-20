@@ -43,9 +43,19 @@ import httpx
 
 from agent_card import Skill, build_card
 from identity import Identity
-from room import OPEN_CALL, RoomClient, RoomError
+from room import ERROR, NOTICE, OPEN_CALL, RoomClient, RoomError
 
-Answerer = Callable[[str, dict], "str | None | Awaitable[str | None]"]
+# A handler returns text, or a dict to control how it is posted:
+#   {"text": ..., "kind": "error"}  → tried and failed; settles the ask but is
+#                                     never filed as an answer
+#   {"text": ..., "flag_human": True} → a person needs to look
+Reply = "str | dict | None"
+Answerer = Callable[[str, dict], "str | dict | None | Awaitable[str | dict | None]"]
+
+
+def claimed_by_notice(item: dict) -> bool:
+    """Open calls already announced themselves when they were claimed."""
+    return item["utterance"].get("to") == OPEN_CALL
 
 
 def _as_skill(spec: "Skill | dict") -> Skill:
@@ -110,13 +120,35 @@ class Participant:
         lowered = text.lower()
         return any(tag in lowered for tag in self.tags)
 
-    async def _reply_to(self, ask: str, ctx: dict) -> str | None:
+    async def _reply_to(self, ask: str, ctx: dict) -> "str | dict | None":
         if self._answer is None:
             raise RuntimeError("no answer function — use @agent.answers")
         result = self._answer(ask, ctx)
         if inspect.isawaitable(result):
             result = await result
         return result
+
+    # ------------------------------------------------------------- posting
+    async def commission(self, topic: str, ask: str, *, to: str = OPEN_CALL,
+                         room_id: str | None = None) -> dict:
+        """Post work for someone else. This is how an agent hires the guild.
+
+        With `to` left alone it is an open call any qualified agent may claim;
+        naming an agent assigns it to them directly. A room is created for it
+        unless you pass one, so a commission is a one-liner.
+        """
+        if room_id is None:
+            room = await self.client.create_room(topic)
+            room_id = room["room_id"]
+        await self.client.join(room_id)
+        posted = await self.client.say(room_id, ask, to=to)
+        return {"room_id": room_id, "utterance_id": posted["id"], "to": to}
+
+    async def follow_up(self, room_id: str, since: int = 0,
+                        wait: float = 0.0) -> list[dict]:
+        """Read what came back on a commission you posted."""
+        state = await self.client.read(room_id, since=since, wait=wait)
+        return state["utterances"]
 
     # ------------------------------------------------------------- lifecycle
     async def register(self) -> None:
@@ -180,6 +212,11 @@ class Participant:
     async def _work(self, item: dict, claimed: bool) -> None:
         room_id = item["room"]["room_id"]
         utterance = item["utterance"]
+        if not claimed_by_notice(item):
+            # Say "mine" before doing slow work, or the next poll hands the
+            # same ask to us again while we are still on the first one.
+            await self.client.join(room_id)
+            await self.client.say(room_id, f"{self.name} is on it.", kind=NOTICE)
         ctx = {
             "room_id": room_id,
             "topic": item["room"]["topic"],
@@ -192,8 +229,13 @@ class Participant:
         reply = await self._reply_to(utterance["text"], ctx)
         if not reply:
             return
+        out = {"text": reply} if isinstance(reply, str) else dict(reply)
         await self.client.join(room_id)
-        await self.client.say(room_id, reply, to=utterance["author_name"])
+        await self.client.say(room_id, out["text"],
+                              to=out.get("to", utterance["author_name"]),
+                              kind=out.get("kind", "say"),
+                              status=out.get("status", ""),
+                              flag_human=bool(out.get("flag_human")))
 
     def run(self) -> None:
         """Blocking entry point for a standalone process."""

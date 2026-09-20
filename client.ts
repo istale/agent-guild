@@ -144,8 +144,16 @@ export interface Ctx {
   from: "customer" | "agent";
   openCall: boolean;
 }
-/** A string is said to the room; an object lets you address or escalate it. */
-export type Reply = string | { text: string; to?: string; status?: string } | null;
+/**
+ * A string is said to the room; an object lets you address or escalate it.
+ * `kind: "error"` means you tried and could not — it settles the ask without
+ * being filed as an answer and the customer never sees it. `flagHuman` puts
+ * the room in front of a person.
+ */
+export type Reply = string | {
+  text: string; to?: string; status?: string;
+  kind?: "say" | "error" | "notice"; flagHuman?: boolean;
+} | null;
 export type Handler = (ask: string, ctx: Ctx) => Promise<Reply> | Reply;
 
 export class Participant {
@@ -239,9 +247,11 @@ export class Participant {
 
   join = (roomId: string) => this.post(`/rooms/${roomId}/join`, "room/join");
 
-  say = (roomId: string, text: string, opts: { to?: string; status?: string } = {}) =>
+  say = (roomId: string, text: string,
+         opts: { to?: string; status?: string; kind?: string; flagHuman?: boolean } = {}) =>
     this.post(`/rooms/${roomId}/utterances`, "room/post",
-      { text, to: opts.to ?? "", kind: "say", status: opts.status ?? "" });
+      { text, to: opts.to ?? "", kind: opts.kind ?? "say",
+        status: opts.status ?? "", flag_human: opts.flagHuman ?? false });
 
   claim = (roomId: string, utteranceId: string) =>
     this.post(`/rooms/${roomId}/openings/${utteranceId}/claim`, "room/claim");
@@ -273,11 +283,36 @@ export class Participant {
     return found.matches.filter((m: any) => m.card.did !== this.did);
   }
 
+  /**
+   * Post work for someone else — how an agent hires the guild. Leaving `to`
+   * unset makes it an open call anyone qualified may claim; naming an agent
+   * assigns it directly. A room is created unless you pass one.
+   */
+  async commission(topic: string, ask: string,
+                   opts: { to?: string; roomId?: string } = {}): Promise<any> {
+    const to = opts.to ?? "*";
+    let roomId = opts.roomId;
+    if (!roomId) {
+      const room = (await this.post("/rooms", "room/create", { topic })) as any;
+      roomId = room.room_id as string;
+    }
+    await this.join(roomId);
+    const posted = (await this.say(roomId, ask, { to })) as any;
+    return { roomId, utteranceId: posted.id, to };
+  }
+
+  /** Read what came back on a commission you posted. */
+  async followUp(roomId: string, since = 0, wait = 0): Promise<any[]> {
+    return (await this.read(roomId, since, wait)).utterances;
+  }
+
   private async speak(roomId: string, reply: Reply): Promise<void> {
     if (!reply) return;
     const out = typeof reply === "string" ? { text: reply } : reply;
     await this.join(roomId);
-    await this.say(roomId, out.text, { to: out.to, status: out.status });
+    await this.say(roomId, out.text, {
+      to: out.to, status: out.status, kind: out.kind, flagHuman: out.flagHuman,
+    });
   }
 
   /**
@@ -304,6 +339,14 @@ export class Participant {
           const state = await this.read(roomId, seen.get(roomId));
           for (const u of state.utterances) {
             seen.set(roomId, Math.max(seen.get(roomId) ?? 0, u.seq));
+            if (u.kind === "error" && u.to === this.name) {
+              await this.speak(roomId, {
+                text: "I could not reach the team that owns this. I have "
+                    + "passed it to a colleague and we will come back to you.",
+                status: "waiting", flagHuman: true,
+              });
+              continue;
+            }
             if (u.kind !== "say") continue;
             const external = u.author_owner === "external";
             if (!external && u.to !== this.name) continue;
