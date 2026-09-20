@@ -113,27 +113,65 @@ class A2APeer:
         resp.raise_for_status()
         body = resp.json()
         if "error" in body:
-            raise RuntimeError(f"A2A error: {body['error']}")
-        return extract_text(body.get("result", {}))
+            err = body["error"]
+            raise RuntimeError(
+                f"A2A error {err.get('code')}: {err.get('message', err)}")
+        result = body.get("result", {})
+        state = task_state(result)
+        text = extract_text(result)
+        if state in FAILED_STATES:
+            # A failed remote task is not an answer: let the caller turn it
+            # into an error in the room instead of filing it as knowledge.
+            raise RuntimeError(f"remote task {state}: {text[:300]}")
+        return text
+
+
+# Hermes answers with protobuf-shaped JSON: the state is an enum name and a
+# text part carries `text` + `mediaType` with no `kind` discriminator at all.
+# Requiring kind == "text" (as the A2A docs' examples show) finds nothing.
+FAILED_STATES = {"failed", "rejected", "canceled", "cancelled", "unknown"}
+
+
+def task_state(result: dict) -> str:
+    """`TASK_STATE_COMPLETED` and `completed` both mean completed."""
+    raw = str((result.get("status") or {}).get("state") or "").lower()
+    return raw.removeprefix("task_state_").replace("-", "_")
+
+
+def parts_text(parts: list | None) -> list[str]:
+    """Text out of A2A parts, whether or not they declare a kind."""
+    out = []
+    for part in parts or []:
+        if part.get("kind") in (None, "text") and part.get("text"):
+            out.append(str(part["text"]))
+    return out
 
 
 def extract_text(result: dict) -> str:
-    """Pull the readable answer out of an A2A Task or Message."""
-    chunks: list[str] = []
-    for artifact in result.get("artifacts", []) or []:
-        for part in artifact.get("parts", []) or []:
-            if part.get("kind") == "text" and part.get("text"):
-                chunks.append(part["text"])
-    if not chunks:
-        history = result.get("history") or []
-        messages = [result] if result.get("kind") == "message" else []
-        for message in messages or history[-1:]:
-            for part in message.get("parts", []) or []:
-                if part.get("kind") == "text" and part.get("text"):
-                    chunks.append(part["text"])
-    if not chunks and result.get("status", {}).get("message"):
-        chunks.append(str(result["status"]["message"]))
-    return "\n".join(chunks).strip() or "(the agent returned no text)"
+    """Pull the readable answer out of an A2A Task or Message.
+
+    Three places hold it, in order of preference: the artifacts, the status
+    message, and the last turn of the history. The same text often appears in
+    more than one, so the first that yields anything wins instead of all of
+    them being concatenated.
+    """
+    for artifact in result.get("artifacts") or []:
+        if chunks := parts_text(artifact.get("parts")):
+            return "\n".join(chunks).strip()
+
+    status_message = (result.get("status") or {}).get("message")
+    if isinstance(status_message, dict):
+        if chunks := parts_text(status_message.get("parts")):
+            return "\n".join(chunks).strip()
+    elif isinstance(status_message, str) and status_message.strip():
+        return status_message.strip()
+
+    if chunks := parts_text(result.get("parts")):      # a bare Message reply
+        return "\n".join(chunks).strip()
+    for message in reversed(result.get("history") or []):
+        if chunks := parts_text(message.get("parts")):
+            return "\n".join(chunks).strip()
+    return "(the agent returned no text)"
 
 
 def parse_skill(spec: str) -> Skill:
