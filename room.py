@@ -16,6 +16,7 @@ posts are checked against the token the platform handed that customer.
 from __future__ import annotations
 
 import asyncio
+import os
 import re
 import secrets
 import time
@@ -24,6 +25,7 @@ from dataclasses import dataclass, field
 import httpx
 from fastapi import APIRouter, Body, HTTPException
 
+import knowledge
 from envelope import new_id, open_envelope, sign_envelope
 from agent_card import AgentCard
 from identity import Identity
@@ -225,8 +227,34 @@ class RoomStore:
         room.utterances.append(utterance)
         if status:
             room.status = status
+        self._file_knowledge(room, utterance)
         self._wake()
         return utterance
+
+    def _file_knowledge(self, room: Room, utterance: Utterance) -> None:
+        """An internal agent just answered a directed ask — keep the pair.
+
+        The question filed is the customer's own words when there are any, not
+        the ask the front-line agent composed, so the log matches how the next
+        customer will phrase it.
+        """
+        if (utterance.kind != SAY or not utterance.to
+                or utterance.author_owner in ("external", "platform")):
+            return
+        ask = next((u for u in reversed(room.utterances[:-1])
+                    if u.kind == SAY and u.author_name != utterance.author_name
+                    and (u.to == utterance.author_name
+                         or (room.claims.get(u.utterance_id) or {}).get("agent")
+                         == utterance.author_name)), None)
+        if ask is None:
+            return
+        customer_words = next((u.text for u in reversed(room.utterances)
+                               if u.author_owner == "external"
+                               and u.seq < utterance.seq), "")
+        knowledge.store.record(
+            question=customer_words or ask.text, answer=utterance.text,
+            by_agent=utterance.author_name, by_human=utterance.author_owner,
+            room_id=room.room_id)
 
     def claim(self, room_id: str, utterance_id: str, card: AgentCard) -> dict:
         """Take an open call. First caller wins; everyone else gets a 409."""
@@ -322,7 +350,19 @@ class RoomStore:
             pass
 
 
-store = RoomStore()
+def _seconds(name: str, default: float) -> float:
+    try:
+        return float(os.environ.get(name, default))
+    except ValueError:
+        return default
+
+
+# Tunable without touching the code: shorten them to watch the board work.
+store = RoomStore(
+    claim_ttl=_seconds("HUB_CLAIM_TTL", 120.0),
+    escalate_after=_seconds("HUB_ESCALATE_AFTER", 60.0),
+    human_after=_seconds("HUB_HUMAN_AFTER", 180.0),
+)
 router = APIRouter(tags=["rooms"])
 
 

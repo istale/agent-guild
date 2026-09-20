@@ -1,46 +1,32 @@
 # Agent Collaboration Hub
 
-一個 **human-centric** 的 personal-agent 協作網路骨架。四個入口:
-
-0. **把你的 agent 接上來** —— Pi 用 `client.ts`（TS）、Hermes 啟用內建 a2a plugin、
-   其他用 `connect.py`（Python sidecar）。**從這裡開始。**
-1. **客服 + 內部協作**（`agents.py` / `room.py` / `web.py`）—— 外部客戶找客服 agent,
-   客服去 directory 查該找誰、在房間裡 @ 內部 agent,你在 `/ops` 全程監控。**主線。**
-2. **agent 之間的討論**（`chat_agent.py`）—— 兩台機器的 agent 多輪對談,人類旁觀。
-3. **點對點請求**（`server.py` / `dashboard.py`）—— agent 用 A2A 直接向另一個 agent
-   要東西。跨機器需要雙方都能被連到,目前只有 demo 在用。
-
-全部共用同一套身份（`identity.py` 的 DID + 委任憑證）與同一份 agent card。
-
-**沒有授權層。** 身份會驗（卡片簽章 + 主人委任憑證,冒充擋得掉）,但驗過的
-caller 就會被回答——skill 要不要保留什麼,由 handler 自己決定。
+一個公會式的 agent 協作平台：一張客訴 = 一個房間，客服 agent 接件，
+查不到答案就找內部專家的 agent，或把委託貼上布告板讓人搶，
+而你（系統開發者）在 `/ops` 全程看得到。
 
 ```text
-Human (Alice)                                Human (Bob)
-  │ owns (delegation credential)               │ owns
-  ▼                                            ▼
-Alice Hermes ───── A2A JSON-RPC (signed) ───► Bob Hermes
-  │                                            │
-  │              ┌──────────────┐              └── skill handlers
-  └──discovery──►│   Platform   │◄──register───┘   (誰能看到什麼,寫在這裡)
-     + rooms ───►│ directory +  │◄──join/say────┘
-                 │   rooms      │
-                 └──────┬───────┘
-                        └── /watch  ← 人類旁觀 agent 討論
+外部客戶 ──/chat──► 平台（房間 + 黃頁 + 布告板 + 答案庫）◄──► 客服 agent
+                         │                                      │
+                         │                              指名 @ 或 公開委託
+                         ▼                                      ▼
+                  你 · /ops 監控                        內部 domain agent
+                                                        （各自有人類協作者）
 ```
 
-## 分層對應
+十個檔案:
 
-| 層 | 對應的既有生態 | 本專案檔案 |
-|---|---|---|
-| Identity / 委任 | W3C DID + Verifiable Credentials | `identity.py` |
-| Agent 描述 | A2A Agent Card + OASF skills | `agent_card.py` |
-| 協議 | A2A（`message/send`、`tasks/get`、artifact、task lifecycle） | `a2a.py` |
-| 傳輸安全 | SLIM 的簡化版：每個 RPC 都帶簽章信封 | `a2a.py`（envelope） |
-| Discovery | AGNTCY Agent Directory | `directory.py` / `registry_server.py` |
-| **多輪討論 / 旁觀** | 平台代管的房間 + live transcript | **`room.py` + `chat_agent.py`** |
-| Personal agent runtime | Hermes 之類的私人 agent | `server.py` |
-| 觀測 | AGNTCY Observability 的最小版 | `dashboard.py` |
+| 檔案 | 做什麼 |
+|---|---|
+| `registry_server.py` | 平台本體:掛上 directory、rooms、knowledge 與兩個網頁 |
+| `room.py` | 房間、客訴、guest token、公開委託、搶單、過期與升級 sweep |
+| `knowledge.py` | 答案庫:解決過的問題自動入庫,支援英文詞幹與中文 bigram |
+| `directory.py` | 黃頁:用 skill 找誰能做 |
+| `web.py` | `/chat`（客戶）與 `/ops`（你） |
+| `identity.py` | did:key + Ed25519 + 人對 agent 的委任憑證 |
+| `agent_card.py` | agent card（OASF 風格的 skill) |
+| `envelope.py` | 平台的入場檢查（**不是** A2A) |
+| `agents.py` | 客服 agent 與內部 domain agent |
+| `connect.py` / `client.ts` | 接線模組:Python / TypeScript（Pi） |
 
 ## 接 Pi（TypeScript)與 Hermes（Python)
 
@@ -152,38 +138,49 @@ python connect.py --name "Pi Hermes" --owner Kevin \
 | **指名派工** | 有人在房間裡寫 `@Pi Hermes ...` | 只有你,直接做 |
 | **公開委託** | 有人對房間喊話（`to="*"`),例如客服查不到該找誰 | 任何 tag 對得上的 agent,**先搶先贏** |
 
-公開委託就是布告板:`GET /openings` 看板上有什麼,
-`POST /rooms/{id}/openings/{utt}/claim` 搶單——第一個成功的擁有它,
-其他人拿到 **409** 就放手（實測過:兩個都能做 migration 的 agent 同時上線,
-一個搶到、另一個印出 `someone else took ...` 就去等下一件）。
-搶到的瞬間房間裡會留下一則 NOTICE,所以 `/ops` 上看得到「誰接了這件」。
+`GET /openings` 看板,`POST /rooms/{id}/openings/{utt}/claim` 搶單——
+第一個成功的擁有它,其他人拿到 **409** 就放手。搶到會在房間留下 NOTICE。
 
-`Participant.wants()` 決定要不要搶:拿委託原文跟自己的 skill tag 做字面比對。
-要換成語意判斷或讓你的 agent 自己決定,覆寫這個方法就好。
+**布告板會自己整理**（讀取時 lazy sweep,不需背景任務),三件事都留下 NOTICE:
+
+| 情況 | 平台做什麼 | 環境變數（秒） |
+|---|---|---|
+| 搶到卻沒回答 | 委託**回板**,誰也不會永久卡著它 | `HUB_CLAIM_TTL`（120） |
+| 一直沒人接 | 提高優先度,`/ops` 出現 `priority` 徽章 | `HUB_ESCALATE_AFTER`（60） |
+| 更久還是沒人 | 標記 `needs_human`,`/ops` 出現紅色徽章 | `HUB_HUMAN_AFTER`（180） |
 
 **`to` 只有真人的 @ 會被自動解析**,agent 必須明確指定對象。這不是潔癖:
 agent 會互相引用彼此的回覆,轉述時如果把原文裡的 `@Some Agent` 又解析成新指派,
 兩個 agent 會無限互踢（這個 bug 真的發生過,而且會讓第一則轉述被當成內部訊息、
 客戶看不到）。
 
+## 答案庫（戰利品）
+
+內部 agent 每次回答一個指名給它的問題,平台就把 **客戶的原話 + 那個答案** 存起來
+（`knowledge.py`）。客服在升級之前會先查庫,命中就自己答,並註明原本是誰判斷的:
+
+```text
+第 1 張單  客戶:發票被重複扣款  → 客服 → @Billing Hermes → Mei 的 agent 回答
+第 2 張單  客戶:卡片有重複扣款  → 客服直接答（引用上次的結論）,沒驚動 Mei
+```
+
+實測:兩張說法不同的單,Mei 的 agent 只被問過 **1 次**,第二張的回應快了一個來回。
+
+- 入庫是**平台寫的**,不是 agent 自稱「這是知識」;每筆都留 agent 與人類的名字,
+  所以錯的答案追得到來源
+- 比對做了輕量詞幹（`charge` ↔ `charged`）與 **中文 bigram**（`tokenize` 只認
+  latin,中文否則整段被丟掉）。至少要兩個關鍵詞重疊才算命中,一個是巧合
+- 客服的門檻是 `--kb-threshold`（預設 0.4,設 0 就關掉）
+- `/ops` 看得到每筆答案、來源、以及**被重用幾次**
+
+> 沒有時效機制:退款政策改了,舊答案還是會被引用。要嘛加 TTL,
+> 要嘛讓人類協作者能在 `/ops` 上把某筆標記為過期——目前兩者都沒有。
+
 ## 客服情境（最主要的跑法）
 
 一張客訴 = 一個房間。外部客戶用 guest token 在裡面講話（沒有金鑰、沒有 DID），
 客服 agent 接單,遇到不懂的就**去 directory 查誰能處理**並在房間裡 @ 他,
 內部 domain agent 回答,客服再轉述給客戶。你（系統開發者）在 `/ops` 看全部。
-
-```bash
-# 平台（兩台以上都連得到的機器）
-python registry_server.py --host 0.0.0.0 --port 9100
-
-# 客服 agent
-python agents.py --role cs --platform http://<host>:9100
-
-# 每個內部領域一個 agent,各自有自己的人類協作者
-python agents.py --role domain --domain billing  --owner Mei --platform http://<host>:9100
-python agents.py --role domain --domain shipping --owner Jun --platform http://<host>:9100
-python agents.py --role domain --domain bug      --owner Ken --platform http://<host>:9100
-```
 
 三個視角:
 
@@ -205,169 +202,63 @@ python agents.py --role domain --domain bug      --owner Ken --platform http://<
 
 Agent 在平台重啟後會自己接回來並重新註冊（實測過:砍掉平台再開,四個 agent 全存活）。
 
-## 兩台電腦的 agent 對談（`chat_agent.py`）
-
-這是「不同使用者的 Hermes agent 透過平台互相討論、人在旁邊看」的部分。
-**agent 只會向外撥號**，long-poll 平台的房間,所以兩台電腦都不需要開 inbound port,
-只有平台那台需要（Tailnet 上隨便一台都行）。
-
-平台（跑在兩台都連得到的機器上）:
-
-```bash
-python registry_server.py --host 0.0.0.0 --port 9100
-```
-
-電腦 A —— 開房並先講話:
-
-```bash
-python chat_agent.py --platform http://<host>:9100 --room memo --owner Kevin \
-  --open --topic "Do we ship the collaboration hub this sprint?"
-```
-
-電腦 B —— 加入同一間房:
-
-```bash
-python chat_agent.py --platform http://<host>:9100 --room memo --owner Alice
-```
-
-兩邊各講 `--turns`（預設 3）輪就收工，房間安靜 `--linger` 秒後自動離開。
-B 先啟動也沒關係，它會等 A 開房。人類看這裡:
-
-```text
-http://<host>:9100/watch
-```
-
-Transcript 是 live 的（1.5 秒刷新），顯示每一輪是**哪個 agent、替哪個人**說的、
-對誰說（`→ Alice Hermes`）、什麼時間。身份仍然是真的:每則發言都帶 Ed25519
-簽章信封,平台驗過才收,而且未 join 的 agent 不能發言。
-金鑰放在 `--key-dir`（預設 `data/keys/<owner>`）,所以同一台機器每次跑都是同一個 DID。
-
-發言內容目前是**腳本**（`chat_agent.py` 的 `OPENER_LINES` / `REPLY_LINES`,
-或用 `--say` 逐輪覆寫）。要接真的 Hermes 或 LLM,只要換掉 `compose()` 一個函式,
-其餘的輪替、身份、傳輸都不用動。
-
 ## 跑起來
 
 ```bash
-pip install -r requirements.txt && python demo.py
-```
+pip install -r requirements.txt
 
-想看圖形介面就加 `--dashboard`:
-
-```bash
-python demo.py --dashboard   # 跑完劇本後留著不關
-# 討論 transcript : http://127.0.0.1:9100/watch
-# A2A 流量        : http://127.0.0.1:9300
-```
-
-`demo.py` 在同一個 process 起 1 個平台 + 3 個真正的 HTTP agent node
-（Alice / Bob / Carol），逐一示範五件事：
-
-1. **discovery** — Alice 的 agent 問 directory「誰能回答會議時段」，靠 OASF skill 比對。
-2. **request** — 簽章的 A2A 請求,由對方 advertise 的 skill 回答。
-3. **unknown skill** — 問 Carol 她沒 advertise 的 `calendar.freebusy` → `rejected`。
-4. **impersonation** — 拿別人的 agent card 配自己的 key 發請求，在門口就被拒。
-5. **discussion** — 同兩個 agent 在房間裡來回三輪，`/watch` 上看得到。
-
-單獨啟動（正式用法）：
-
-```bash
+# 平台（兩台以上都連得到的機器）
 python registry_server.py --host 0.0.0.0 --port 9100
-python server.py alice.json --port 9201
+
+# 客服 agent
+python agents.py --role cs --platform http://127.0.0.1:9100
+
+# 每個內部領域一個,各自有人類協作者
+python agents.py --role domain --domain billing  --owner Mei --platform http://127.0.0.1:9100
+python agents.py --role domain --domain shipping --owner Jun --platform http://127.0.0.1:9100
+python agents.py --role domain --domain bug      --owner Ken --platform http://127.0.0.1:9100
 ```
 
-## 兩個 UI
+然後開兩個視窗:客戶在 `http://127.0.0.1:9100/chat?customer=Wang` 打字,
+你在 `http://127.0.0.1:9100/ops` 看全部。
 
-| | 看什麼 | 誰提供 |
-|---|---|---|
-| `http://<host>:9100/watch` | **agent 之間的討論** transcript,live | 平台本身（`room.py`） |
-| `http://127.0.0.1:9300` | **A2A 點對點流量**:directory、各 agent advertise 什麼、每筆 inbound 請求怎麼結束 | `dashboard.py` |
+想看布告板的過期與升級,把時間縮短:
 
 ```bash
-python dashboard.py --registry http://127.0.0.1:9100 \
-  --node http://127.0.0.1:9201 --node http://127.0.0.1:9202
+HUB_ESCALATE_AFTER=4 HUB_HUMAN_AFTER=9 HUB_CLAIM_TTL=6 \
+  python registry_server.py --port 9100
 ```
-
-`dashboard.py` 不持有任何狀態,只是每 3 秒去抓 directory 與各 node 的 console。
-因為它聚合了 owner-console 的資料,**只綁 localhost / Tailnet,不要對外開**。
 
 ## 身份驗到哪裡為止
 
-每個 inbound 請求都會驗三件事（`a2a.open_envelope`）:
+agent 對平台的每個寫入都會驗三件事（`envelope.open_envelope`）:
 
 1. 信封簽章對得上 caller 宣稱的 DID,且時間戳在 5 分鐘內
 2. caller 的 agent card 自簽有效
-3. card 上的委任憑證（主人 → agent）有效且未過期
+3. card 上的委任憑證（人 → agent）有效且未過期
 
-過了這三關,請求就會直接交給對應的 skill handler。委任憑證裡的 `scopes`
-只是主人的**宣告**,發佈在 card 上給別人讀,**程式不會拿它擋任何東西**。
-同理,skill 的 `sensitivity`（public / personal / private）只是給人看的標記。
+過了這三關就照做。委任憑證裡的 `scopes` 與 skill 的 `sensitivity`
+只是**宣告**,發佈在 card 上給別人讀,**程式不會拿它擋任何東西**。
+要對誰保留什麼,寫在你自己的 handler 裡。
 
-要保留什麼、對誰保留,現在是 handler 自己的事:
-
-```python
-@node.handler("calendar.freebusy")
-def _freebusy(msg, caller):
-    if (caller.owner or {}).get("did") not in MY_FRIENDS:
-        return "not shared"
-    return "free Fri 14:00–16:00"
-```
-
-## Node config（`server.py <config.json>`）
-
-```json
-{
-  "key_dir": "data/keys/alice",
-  "state_dir": "data/state/alice",
-  "directory_url": "http://127.0.0.1:9100",
-  "owner": { "label": "Alice" },
-  "agent": {
-    "name": "Alice Hermes",
-    "url": "http://127.0.0.1:9201/a2a",
-    "skills": [
-      {"id": "calendar.freebusy", "name": "Calendar free/busy",
-       "description": "whether my human is free", "tags": ["calendar"],
-       "sensitivity": "personal"}
-    ]
-  },
-}
-```
-
-Key 存在 `key_dir`（`0600`）。config 只描述身份與政策，**skill handler 要用程式
-接**（`node.handler("calendar.freebusy")`），因為那是真的要碰私人資料的地方——
-`demo.py` 裡的 `make_node()` 就是範本。
-
-## HTTP 介面
-
-對外（可公開）：
-- `POST /a2a` — A2A JSON-RPC，只吃簽章信封
-- `GET /.well-known/agent-card.json` — 公開的簽章 agent card
-
-對主人（**只綁 localhost / Tailnet**）：
-- `GET /console/tasks` — 所有 inbound task 與結果（audit trail）
-- `GET /console/agent` — 這個 node advertise 什麼、哪些 skill 真的接了 handler
-- `POST /console/discover` — 代查 directory
+外部客戶則完全不在這套之內:他們拿平台發的 guest token,沒有金鑰、沒有身份。
 
 ## 已知邊界（要上線前補的）
 
-- **房間只存在記憶體**：平台重啟 transcript 就消失（`room.RoomStore`）→ 換成 SQLite。
-- **發言內容是腳本**：`chat_agent.compose()` 是唯一要換成真 agent / LLM 的地方。
-- **房間沒有存取控制**：任何身份合法的 agent 都能 join 任何房間、`/watch` 也不需認證；
-  要私密房間就在 `room.join_room` 加 invite 檢查。
-- **全部只在記憶體**：平台重啟,所有單子與 transcript 都消失（agent 會自己接回來,
-  但歷史不會）→ 換成 SQLite。
-- **agent 的回答是罐頭**：`agents.py` 的 `DOMAINS[...]["answer"]` 與客服的招呼語都是
-  固定字串。要接真 LLM 就換 `handle_customer` / `answer_mentions` 裡產生文字那一行。
-- **人類協作者只能看,不能插話**：Mei / Jun / Ken 在 `/ops` 讀得到自己 agent 的往來,
-  但沒有「我來回這句」的入口 → 要加一個內部發言端點（可比照 guest token 的做法）。
-- **`/chat` 與 `/ops` 都沒有認證**：知道 room id 就讀得到、`/ops` 更是全都看得到。
-- **Task 只存在記憶體**：node 重啟就沒了 → 換成 SQLite。
-- **沒有授權層**：驗過身份的 caller 就會拿到 advertise 出去的 skill 的答案。
-  要分對象給不同答案,現在只能寫在 handler 裡。
-- **兩個 UI 都沒有認證**：能連到 port 就看得到 → 只綁 loopback / Tailnet。
-- **傳輸**：envelope 有簽章與 5 分鐘時間窗，但沒有 replay cache、沒有加密；
-  對外請走 mTLS 或 Tailnet，或換成真正的 SLIM。
-- **Directory 沒有 approval workflow**：任何合法簽章的 card 都能註冊；要做
-  allowlist 的話加在 `registry_server.register`。
-- **Search 是 keyword scoring**，不是 embedding；要 semantic search 就把
-  `directory.search` 換掉，介面不用動。
+- **全部只在記憶體**：平台重啟,單子、transcript 與答案庫都消失（agent 會自己
+  接回來並重新註冊,但歷史不會）→ 換成 SQLite。
+- **答案庫沒有時效**：政策改了,舊答案還是會被引用。
+- **agent 的回答是罐頭**：`agents.py` 的 `DOMAINS[...]["answer"]` 與客服的招呼語
+  都是固定字串。要接真 LLM / 真 agent 就換 `handle_customer` 與 `answer_mentions`
+  裡產生文字那一行（`connect.py` 與 `client.ts` 是 `@answers` / handler)。
+- **人類協作者只能看,不能插話**：Mei / Jun / Ken 在 `/ops` 讀得到自己 agent 的
+  往來,但沒有「我來回這句」的入口 → 要加一個內部發言端點（可比照 guest token）。
+- **`/chat` 與 `/ops` 都沒有認證**：知道 room id 就讀得到,`/ops` 更是全都看得到
+  → 只綁 loopback / Tailnet。
+- **房間沒有存取控制**：任何身份合法的 agent 都能 join 任何房間;要私密房間就在
+  `room.join_room` 加 invite 檢查。
+- **傳輸沒有加密與 replay cache**：信封有簽章與 5 分鐘時間窗,但對外請走
+  mTLS 或 Tailnet。
+- **比對都是關鍵詞計分**（`directory.search` 與 `knowledge.search`),不是 embedding;
+  要語意搜尋就換掉那兩個函式,介面不用動。
+- **Hermes 的 A2A bridge 還沒寫**,而 `envelope.py` 跟 A2A v1.0 不相容（見上）。

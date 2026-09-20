@@ -257,6 +257,16 @@ export class Participant {
   openings = async (wait = 0) =>
     ((await this.get("/openings", { wait })) as any).openings as any[];
 
+  /** Has this been solved before? Returns the best match above `threshold`. */
+  async recall(text: string, threshold = 0.4): Promise<any | null> {
+    const found = (await this.get("/knowledge", { q: text })) as any;
+    const best = found.matches?.[0];
+    if (!best || best.score < threshold) return null;
+    await fetch(`${this.platform}/knowledge/${best.entry_id}/used`,
+                { method: "POST" }).catch(() => {});
+    return best;
+  }
+
   /** Who on the platform can help with this? The directory decides, not me. */
   async search(text: string): Promise<any[]> {
     const found = (await this.get("/search", { q: text, limit: 5 })) as any;
@@ -389,6 +399,14 @@ if (process.argv[1]?.endsWith("client.ts")) {
     }
     if (/thank|謝/i.test(ask)) {
       return { text: "Glad that helped. Closing this ticket.", status: "resolved" };
+    }
+    const known = await pi.recall(ask);        // ← solved before?
+    if (known) {
+      return {
+        text: `We have seen this before — ${known.answer} `
+            + `(originally worked out by ${known.by_agent} for ${known.by_human})`,
+        status: "open",
+      };
     }
     const helpers = await pi.search(ask);      // ← the directory decides
     if (helpers.length === 0) {

@@ -33,6 +33,10 @@ h1{font-size:19px;margin:0 0 2px}.sub{color:var(--dim);font-size:13px;margin:0 0
 .pill.open{color:var(--cs);border-color:currentColor}
 .pill.waiting{color:var(--warn);border-color:currentColor}
 .pill.resolved{color:var(--dim)}
+.pill.high{color:var(--warn);border-color:currentColor}
+.pill.human{color:var(--bad);border-color:currentColor}
+.kb{border-left:3px solid var(--int);padding:6px 0 6px 12px;margin:8px 0;
+ border-radius:0}
 .turn{display:flex;gap:10px;padding:10px 0;border-top:1px solid var(--line)}
 .avatar{width:28px;height:28px;border-radius:50%;flex:0 0 28px;color:#fff;
  display:grid;place-items:center;font-size:11px;font-weight:600}
@@ -141,6 +145,7 @@ OPS_PAGE = """<!doctype html>
 <button onclick="only='waiting';load()">Waiting</button>
 <button onclick="only='open';load()">Open</button></div></div>
 <div class="stat" id="stat"></div>
+<div id="kbcard"></div>
 <div id="root"></div></div><script>__SHARED__
 let only='';
 function roomCard(r){
@@ -149,6 +154,8 @@ function roomCard(r){
   return `<div class="card">
    <div class="row spread"><div>
      <div class="row"><span class="pill ${esc(r.status)}">${esc(r.status)}</span>
+      ${r.priority==='high'?'<span class="pill high">priority</span>':''}
+      ${r.needs_human?'<span class="pill human">needs a human</span>':''}
       <strong>${esc(r.topic)}</strong></div>
      <div class="meta"><code>${esc(r.room_id)}</code>
       ${r.customer?' · customer: '+esc(r.customer):''}
@@ -159,20 +166,35 @@ function roomCard(r){
    <div style="margin-top:10px">${turns}</div></div>`;
 }
 async function load(){
-  let d; try{ d=await (await fetch('/rooms?with_utterances=1')).json(); }
+  let d, kb={count:0,entries:[]};
+  try{ d=await (await fetch('/rooms?with_utterances=1')).json();
+       kb=await (await fetch('/knowledge')).json(); }
   catch(e){ document.getElementById('sub').textContent='platform unreachable';
     return; }
+  const reused=kb.entries.reduce((n,e)=>n+e.used,0);
   const tickets=d.rooms.filter(r=>r.kind==='ticket');
   const waiting=tickets.filter(r=>r.status==='waiting');
   const open=tickets.filter(r=>r.status==='open');
+  const needHuman=d.rooms.filter(r=>r.needs_human);
   document.getElementById('stat').innerHTML=
    `<div><b>${tickets.length}</b>tickets</div>
     <div><b>${open.length}</b>being served</div>
     <div><b>${waiting.length}</b>waiting on internal</div>
-    <div><b>${tickets.filter(r=>r.status==='resolved').length}</b>resolved</div>`;
+    <div><b>${needHuman.length}</b>need a human</div>
+    <div><b>${kb.count}</b>answers on file</div>
+    <div><b>${reused}</b>reused</div>`;
   document.getElementById('sub').textContent=
    `${d.rooms.length} room(s) · live`;
   document.getElementById('tick').textContent=new Date().toLocaleTimeString();
+  document.getElementById('kbcard').innerHTML = kb.count
+    ? `<div class="card"><h2 style="margin:0 0 8px">Answers on file</h2>`
+      + kb.entries.slice(0,6).map(e=>`<div class="kb">
+          <div class="meta">${esc(e.by_agent)} · for ${esc(e.by_human)}
+            · reused ${e.used}&times;</div>
+          <div>${esc(e.question)}</div>
+          <div class="meta">&rarr; ${esc(e.answer)}</div></div>`).join('')
+      + `</div>`
+    : '';
   const shown=d.rooms.filter(r=>!only||r.status===only);
   document.getElementById('root').innerHTML= shown.length
     ? shown.slice().reverse().map(roomCard).join('')

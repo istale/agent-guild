@@ -23,6 +23,7 @@ import os
 from fastapi import Body, FastAPI, HTTPException
 from fastapi.responses import HTMLResponse, RedirectResponse
 
+import knowledge
 import room
 import web
 from agent_card import AgentCard
@@ -32,6 +33,7 @@ STORE = os.environ.get("HUB_REGISTRY_STORE", "data/registry.json")
 directory = Directory(store=STORE)
 app = FastAPI(title="Agent Collaboration Hub — Platform")
 app.include_router(room.router)
+app.include_router(knowledge.router)
 
 
 @app.get("/", include_in_schema=False)

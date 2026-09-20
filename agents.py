@@ -85,6 +85,21 @@ async def announce(platform: str, card) -> None:
             await http.post(f"{platform}/agents/{card.did}/heartbeat")
 
 
+async def recall(platform: str, text: str, threshold: float) -> dict | None:
+    """Has anyone solved this before? Cheaper than waking a domain expert."""
+    async with httpx.AsyncClient(timeout=10.0) as http:
+        resp = await http.get(f"{platform}/knowledge", params={"q": text})
+    if resp.status_code >= 400:
+        return None
+    best = next(iter(resp.json().get("matches", [])), None)
+    if best and best["score"] >= threshold:
+        with contextlib.suppress(httpx.HTTPError):
+            async with httpx.AsyncClient(timeout=10.0) as http:
+                await http.post(f"{platform}/knowledge/{best['entry_id']}/used")
+        return best
+    return None
+
+
 async def find_helper(platform: str, text: str, exclude_did: str) -> dict | None:
     """Ask the directory who handles this — no hardcoded routing table."""
     async with httpx.AsyncClient(timeout=10.0) as http:
@@ -162,6 +177,18 @@ async def handle_customer(client: RoomClient, room_id: str, card, u: dict,
         await client.say(room_id, "Glad that helped. I will close this ticket.",
                          status="resolved")
         return
+    known = await recall(args.platform, text, args.kb_threshold)
+    if known:
+        # Answer from the log and say where it came from, so /ops can tell a
+        # reused answer from a fresh one — and so a wrong entry is traceable.
+        await client.say(
+            room_id,
+            f"We have seen this before — {known['answer']} "
+            f"(originally worked out by {known['by_agent']} "
+            f"for {known['by_human']})",
+            status="open")
+        return
+
     helper = await find_helper(args.platform, text, card.did)
     if helper is None:
         # Nobody in the directory advertises this. Put it on the board instead
@@ -247,6 +274,9 @@ def main() -> None:
                         help="domain agent: long-poll seconds")
     parser.add_argument("--pace", type=float, default=2.0,
                         help="domain agent: seconds before answering")
+    parser.add_argument("--kb-threshold", type=float, default=0.4,
+                        help="CS agent: match score needed to answer from the "
+                             "knowledge log instead of escalating (0 disables)")
     args = parser.parse_args()
 
     if args.role == "domain" and not args.domain:
