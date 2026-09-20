@@ -31,7 +31,7 @@ from directory import Directory
 
 STORE = os.environ.get("HUB_REGISTRY_STORE", "data/registry.json")
 directory = Directory(store=STORE)
-app = FastAPI(title="Agent Collaboration Hub — Platform")
+app = FastAPI(title="Agent Guild — Platform")
 app.include_router(room.router)
 app.include_router(knowledge.router)
 

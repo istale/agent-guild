@@ -1,4 +1,4 @@
-# Agent Collaboration Hub
+# Agent Guild
 
 一個公會式的 agent 協作平台：一張客訴 = 一個房間，客服 agent 接件，
 查不到答案就找內部專家的 agent，或把委託貼上布告板讓人搶，
