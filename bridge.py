@@ -48,18 +48,43 @@ class A2APeer:
     def headers(self) -> dict:
         return {"Authorization": f"Bearer {self.token}"} if self.token else {}
 
+    WELL_KNOWN = ("/.well-known/agent-card.json", "/.well-known/agent.json")
+
     async def fetch_card(self) -> dict:
         """A2A v1.0 publishes the card at a well-known path; older peers used
-        agent.json, and Hermes answers both."""
+        agent.json, and Hermes answers both.
+
+        When the peer URL carries a path, the card served there is compared
+        with the one at the origin root. A JSON-RPC endpoint that ignores the
+        path answers every request as the root agent, so a path-scoped peer
+        whose card is identical to root is not a separate agent at all — and
+        forwarding to it would quietly send one domain's questions to another
+        domain's agent. That is a refusal, not a warning.
+        """
         async with httpx.AsyncClient(timeout=20.0) as http:
-            for path in ("/.well-known/agent-card.json", "/.well-known/agent.json"):
-                with contextlib.suppress(httpx.HTTPError):
-                    resp = await http.get(f"{self.url}{path}", headers=self.headers)
-                    if resp.status_code < 400:
-                        self.card = resp.json()
-                        self.rpc_url = self._rpc_endpoint()
-                        return self.card
-        raise RuntimeError(f"no agent card at {self.url}")
+            card = await self._card_at(http, self.url)
+            if card is None:
+                raise RuntimeError(f"no agent card at {self.url}")
+            origin = str(httpx.URL(self.url).copy_with(path="", query=None,
+                                                       fragment=None)).rstrip("/")
+            if origin != self.url.rstrip("/"):
+                root = await self._card_at(http, origin)
+                if root is not None and identity_of(root) == identity_of(card):
+                    raise RuntimeError(
+                        f"{self.url} serves the same agent as {origin} "
+                        f"({root.get('name')!r}) — path routing is not in "
+                        "effect, refusing to forward")
+        self.card = card
+        self.rpc_url = self._rpc_endpoint()
+        return self.card
+
+    async def _card_at(self, http: httpx.AsyncClient, base: str) -> dict | None:
+        for path in self.WELL_KNOWN:
+            with contextlib.suppress(httpx.HTTPError, ValueError):
+                resp = await http.get(f"{base}{path}", headers=self.headers)
+                if resp.status_code < 400:
+                    return resp.json()
+        return None
 
     def _rpc_endpoint(self) -> str:
         """An A2A card names its own JSON-RPC endpoint. Honour it only when it
@@ -138,6 +163,12 @@ FAILED_STATES = {"failed", "rejected", "canceled", "cancelled", "unknown"}
 ASK_STATES = {"input_required", "auth_required"}
 
 
+def identity_of(card: dict) -> tuple:
+    """What makes two agent cards the same agent, for the path-routing check."""
+    return (card.get("name"),
+            tuple(sorted(s.get("id", "") for s in card.get("skills") or [])))
+
+
 def task_state(result: dict) -> str:
     """`TASK_STATE_COMPLETED` and `completed` both mean completed."""
     raw = str((result.get("status") or {}).get("state") or "").lower()
@@ -196,6 +227,13 @@ async def run_bridge(args: argparse.Namespace) -> None:
     peer = A2APeer(args.peer, args.token)
     card = await peer.fetch_card()
     remote_name = args.name or card.get("name") or "A2A agent"
+    advertised = {s.get("id") for s in card.get("skills") or []}
+    missing = [want for want in args.expect_skill if want not in advertised]
+    if missing:
+        raise RuntimeError(
+            f"{peer.url} advertises {sorted(advertised)}, which does not "
+            f"include {missing} — refusing to forward to the wrong agent")
+
     override = [parse_skill(spec) for spec in args.skill] if args.skill else None
     offered = peer.skills(override)
     print(f"peer {peer.url} → {remote_name}  (rpc: {peer.rpc_url})")
@@ -257,6 +295,9 @@ def main() -> None:
     parser.add_argument("--name", default=None,
                         help="override the name from the peer's agent card")
     parser.add_argument("--key-dir", default=None)
+    parser.add_argument("--expect-skill", action="append", default=[],
+                        help="refuse to start unless the peer's own card "
+                             "advertises this skill id (repeatable)")
     parser.add_argument("--skill", action="append", default=[],
                         help="advertise this instead of the peer's own list: "
                              "\"billing.support:billing,invoice,refund\" "
@@ -268,8 +309,14 @@ def main() -> None:
     args.key_dir = args.key_dir or (
         f"data/keys/bridge-{(args.name or args.peer).lower().replace(' ', '-')}")
 
-    with contextlib.suppress(KeyboardInterrupt):
+    try:
         asyncio.run(run_bridge(args))
+    except KeyboardInterrupt:
+        pass
+    except RuntimeError as exc:
+        # Operator-facing: a refusal is a sentence, not a traceback.
+        print(f"bridge did not start: {exc}")
+        raise SystemExit(2) from None
 
 
 if __name__ == "__main__":

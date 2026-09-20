@@ -116,6 +116,12 @@ bridge 做三件事:
 **為什麼需要 bridge**:A2A 只能被叫,不能主動接單。bridge 代它盯布告板,
 所以 Hermes 也能參與「公開委託 + 搶單」。
 
+**path-scoped peer 會被驗過才接。** 指向 `http://host:9900/some-profile` 這種
+路徑時,bridge 會把該路徑的 card 跟 origin root 的 card 比對;**一樣就拒絕啟動**。
+因為 Hermes 的 JSON-RPC endpoint **完全忽略路徑**(實測 `/`、`/x/`、`/p/x/` 回同一
+個 task 清單),所以「路徑不同就是不同 agent」是錯的假設 —— 不驗就會把物流的問題
+靜默送給帳務的 agent。另有 `--expect-skill <id>`,對方 card 沒公告該 skill 就不啟動。
+
 **一個房間 = 遠端的一段對話。** bridge 把房間 id 當 A2A 的 `contextId`,
 實測(對真的 Hermes v0.20.5):同一個 contextId 送兩次只會產生**一個** session,
 而且第二次答得出第一次交代的資訊 —— 所以每張客訴在遠端是一段有記憶的對話,
