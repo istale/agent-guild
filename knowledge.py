@@ -19,34 +19,8 @@ from dataclasses import dataclass, field
 from fastapi import APIRouter, HTTPException
 
 import db as database
-from directory import tokenize
+from directory import keywords
 from envelope import new_id
-
-# Words that carry no meaning for matching a support question.
-STOPWORDS = {
-    "the", "a", "an", "and", "or", "but", "if", "is", "are", "was", "were",
-    "i", "my", "me", "you", "your", "it", "this", "that", "for", "to", "of",
-    "in", "on", "at", "with", "please", "have", "has", "had", "do", "does",
-    "can", "could", "would", "will", "not", "no", "am", "be", "been", "get",
-    "got", "just", "there", "they", "them", "customer", "says", "look", "take",
-}
-
-
-CJK_RUN = re.compile(r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]{2,}")
-
-
-def stem(word: str) -> str:
-    """Crudest useful stemmer: "charged", "charges" and "charge" must match.
-
-    Not linguistics — just enough that a customer writing "duplicate charge"
-    hits an answer filed under "charged twice".
-    """
-    for suffix in ("ing", "ed", "es", "s"):
-        if word.endswith(suffix) and len(word) - len(suffix) >= 3:
-            word = word[: -len(suffix)]
-            break
-    return word[:-1] if word.endswith("e") and len(word) > 4 else word
-
 
 QUESTION_MARKS = ("?", "？")
 # Phrases that mean "I need more from you before I can answer". A reply built

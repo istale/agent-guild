@@ -18,10 +18,41 @@ from pathlib import Path
 from agent_card import AgentCard
 
 _WORD = re.compile(r"[a-z0-9_.]+")
+_CJK_RUN = re.compile(r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]{2,}")
+
+# Words that carry no routing signal. Without this list a skill description
+# containing "the" matches any sentence containing "the", which means one
+# registered agent quietly becomes the answer to everything.
+STOPWORDS = {
+    "the", "a", "an", "and", "or", "but", "if", "is", "are", "was", "were",
+    "i", "my", "me", "you", "your", "it", "this", "that", "for", "to", "of",
+    "in", "on", "at", "with", "please", "have", "has", "had", "do", "does",
+    "can", "could", "would", "will", "not", "no", "am", "be", "been", "get",
+    "got", "just", "there", "they", "them", "customer", "says", "look", "take",
+    "handled", "remote", "agent", "general", "help", "support",
+}
 
 
 def tokenize(text: str) -> list[str]:
     return _WORD.findall(text.lower())
+
+
+def stem(word: str) -> str:
+    """"charged", "charges" and "charge" have to match each other."""
+    for suffix in ("ing", "ed", "es", "s"):
+        if word.endswith(suffix) and len(word) - len(suffix) >= 3:
+            word = word[: -len(suffix)]
+            break
+    return word[:-1] if word.endswith("e") and len(word) > 4 else word
+
+
+def keywords(text: str) -> set[str]:
+    """Meaningful words only: stemmed, stopword-free, plus CJK bigrams."""
+    words = {stem(t) for t in tokenize(text)
+             if t not in STOPWORDS and len(t) > 2}
+    for run in _CJK_RUN.findall(text):
+        words |= {run[i:i + 2] for i in range(len(run) - 1)}
+    return words
 
 
 @dataclass
@@ -117,7 +148,7 @@ class Directory:
                skill_id: str | None = None, limit: int = 10,
                include_unreachable: bool = True) -> list[Match]:
         """Score cards by keyword overlap with their OASF skill descriptions."""
-        terms = set(tokenize(query))
+        terms = keywords(query)
         results: list[Match] = []
         for rec in self.records.values():
             if owner_did and (rec.card.owner or {}).get("did") != owner_did:
@@ -131,7 +162,7 @@ class Directory:
                 if skill_id and skill.id == skill_id:
                     best.append((1.0, skill.id))
                     continue
-                tokens = set(tokenize(skill.search_text()))
+                tokens = keywords(skill.search_text())
                 hits = terms & tokens
                 if hits:
                     best.append((len(hits) / max(len(terms), 1), skill.id))

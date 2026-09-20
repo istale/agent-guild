@@ -184,10 +184,11 @@ def parse_skill(spec: str) -> Skill:
     """`billing.support:billing,invoice,refund` → a Skill with those tags."""
     skill_id, _, tags = spec.partition(":")
     words = [t.strip() for t in tags.split(",") if t.strip()]
+    # No prose description: every word in it becomes a routing keyword, and
+    # boilerplate like "handled by the remote agent" would match anything.
     return Skill(id=skill_id.strip() or "a2a.general",
                  name=skill_id.strip().replace(".", " ") or "general",
-                 description=f"handled by the remote agent ({skill_id.strip()})",
-                 tags=words, sensitivity="public")
+                 description="", tags=words, sensitivity="public")
 
 
 async def run_bridge(args: argparse.Namespace) -> None:

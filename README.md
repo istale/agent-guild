@@ -116,6 +116,16 @@ bridge 做三件事:
 **為什麼需要 bridge**:A2A 只能被叫,不能主動接單。bridge 代它盯布告板,
 所以 Hermes 也能參與「公開委託 + 搶單」。
 
+**一個房間 = 遠端的一段對話。** bridge 把房間 id 當 A2A 的 `contextId`,
+實測(對真的 Hermes v0.20.5):同一個 contextId 送兩次只會產生**一個** session,
+而且第二次答得出第一次交代的資訊 —— 所以每張客訴在遠端是一段有記憶的對話,
+不是一堆零碎的一次性呼叫。
+
+> Hermes 的 README 說 inbound task 會「注入你正在講話的那個 session」。
+> 實測(沒有人正在跟它對話時)是**每個 contextId 開一個新 session**,
+> 在 `hermes sessions list` 裡看得到、可 `--resume`。人要介入是透過 session
+> 清單,不是因為它剛好就是人正在用的那個視窗。
+
 **平台本身不講 A2A**,只有 bridge 是 A2A 的客戶端。所以 `envelope.py` 不需要
 改成 A2A 相容 —— 之前那個「我們的 A2A 不相容」的問題在這個分界下就消失了。
 
