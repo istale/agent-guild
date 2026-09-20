@@ -72,7 +72,17 @@ class A2APeer:
         same_host = (theirs.host, theirs.port) == (mine.host, mine.port)
         return declared if same_host else self.url
 
-    def skills(self) -> list[Skill]:
+    def skills(self, override: list[Skill] | None = None) -> list[Skill]:
+        """What to advertise on the guild's behalf.
+
+        A Hermes card lists one entry per *toolset* (browser, spotify,
+        terminal, …) with tool names as tags. Registering that verbatim makes
+        the proxy match almost every open call on the board and pulls
+        unrelated tickets towards it, so an operator can name the domain
+        skills this peer should actually be offered.
+        """
+        if override:
+            return override
         out = []
         for raw in self.card.get("skills", []):
             out.append(Skill(
@@ -126,20 +136,40 @@ def extract_text(result: dict) -> str:
     return "\n".join(chunks).strip() or "(the agent returned no text)"
 
 
+def parse_skill(spec: str) -> Skill:
+    """`billing.support:billing,invoice,refund` → a Skill with those tags."""
+    skill_id, _, tags = spec.partition(":")
+    words = [t.strip() for t in tags.split(",") if t.strip()]
+    return Skill(id=skill_id.strip() or "a2a.general",
+                 name=skill_id.strip().replace(".", " ") or "general",
+                 description=f"handled by the remote agent ({skill_id.strip()})",
+                 tags=words, sensitivity="public")
+
+
 async def run_bridge(args: argparse.Namespace) -> None:
     sys.stdout.reconfigure(line_buffering=True)
     peer = A2APeer(args.peer, args.token)
     card = await peer.fetch_card()
     remote_name = args.name or card.get("name") or "A2A agent"
+    override = [parse_skill(spec) for spec in args.skill] if args.skill else None
+    offered = peer.skills(override)
     print(f"peer {peer.url} → {remote_name}  (rpc: {peer.rpc_url})")
-    print(f"skills: {[s.id for s in peer.skills()]}")
+    if override:
+        print(f"advertising (override): {[s.id for s in offered]}")
+        print(f"peer's own card listed {len(peer.skills())} skill(s), ignored")
+    else:
+        print(f"advertising (from card): {[s.id for s in offered]}")
+        if len(offered) > 5:
+            print(f"!! {len(offered)} skills with "
+                  f"{sum(len(s.tags) for s in offered)} tags — this proxy will "
+                  "match a lot of open calls; consider --skill to narrow it")
 
     proxy = Participant(
         name=remote_name,
         owner=args.owner,
         platform=args.platform,
         key_dir=args.key_dir,
-        skills=peer.skills(),
+        skills=offered,
         description=f"{args.owner}'s {remote_name}, reached over A2A by a bridge",
         poll=args.poll,
         take_open_calls=not args.no_open_calls,
@@ -179,6 +209,10 @@ def main() -> None:
     parser.add_argument("--name", default=None,
                         help="override the name from the peer's agent card")
     parser.add_argument("--key-dir", default=None)
+    parser.add_argument("--skill", action="append", default=[],
+                        help="advertise this instead of the peer's own list: "
+                             "\"billing.support:billing,invoice,refund\" "
+                             "(repeatable)")
     parser.add_argument("--poll", type=float, default=20.0)
     parser.add_argument("--no-open-calls", action="store_true",
                         help="only forward asks addressed to it by name")
