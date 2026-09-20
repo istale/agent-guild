@@ -47,6 +47,38 @@ def stem(word: str) -> str:
     return word[:-1] if word.endswith("e") and len(word) > 4 else word
 
 
+QUESTION_MARKS = ("?", "？")
+# Phrases that mean "I need more from you before I can answer". A reply built
+# out of these resolves nothing, so it must not be filed as an answer.
+ASKING_FOR_MORE = (
+    "please provide", "please share", "please send", "please confirm",
+    "could you provide", "could you share", "can you provide", "can you send",
+    "i need the following", "need a few", "need more information",
+    "請提供", "請問", "請告知", "請確認", "麻煩提供", "需要幾項", "需要以下",
+    "想確認", "可以給我",
+)
+
+
+def looks_like_question(text: str) -> bool:
+    """Is this reply asking for information rather than giving an answer?
+
+    A heuristic, and it is only the backstop: an agent that knows it is asking
+    a follow-up should say so (`needs_input`), because no amount of string
+    matching gets this right. What it does catch is the common shape — a reply
+    whose lines are mostly questions, or one that asks for details outright.
+    """
+    lowered = text.lower()
+    if any(phrase in lowered for phrase in ASKING_FOR_MORE):
+        return True
+    lines = [line.strip() for line in text.strip().splitlines() if line.strip()]
+    if not lines:
+        return False
+    if lines[-1].endswith(QUESTION_MARKS):
+        return True
+    asks = sum(1 for line in lines if line.endswith(QUESTION_MARKS))
+    return asks > 0 and asks * 2 >= len(lines)
+
+
 def keywords(text: str) -> set[str]:
     """Latin word stems plus CJK character bigrams.
 
@@ -101,6 +133,11 @@ class KnowledgeBase:
                by_human: str, room_id: str) -> Entry | None:
         question, answer = question.strip(), answer.strip()
         if not question or not answer:
+            return None
+        if looks_like_question(answer):
+            # A follow-up question is not knowledge. Filing it would mean the
+            # next customer with a similar problem gets asked the same
+            # questions back instead of being served the eventual answer.
             return None
         for existing in self.entries.values():
             if existing.question == question and existing.answer == answer:

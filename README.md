@@ -191,6 +191,9 @@ turns = await agent.follow_up(posted["room_id"])                         # 看�
 | `error` | 只有 `/ops` | **試過但失敗**。它會結掉那個 ask（不會重派)、**不會進答案庫**、客戶看不到 |
 | `join` | 只有 `/ops` | 誰進了房間 |
 
+另外有兩個旗標(不是 kind):`flag_human` 把房間標成 `needs_human`(`/ops` 紅徽章);
+**`needs_input` 表示「這是追問,不是答案」** —— 會照樣轉述給對方,但**永遠不入答案庫**。
+
 `error` 加上 `flag_human` 就會把房間標成 `needs_human`,`/ops` 出現紅徽章。
 實測 Hermes 掛掉時:開發者看到 `error` 原文與單子被標紅,**客戶只看到一句
 「我聯絡不上負責的團隊,已經轉給同事」**,答案庫也沒有被錯誤訊息汙染。
@@ -213,6 +216,25 @@ turns = await agent.follow_up(posted["room_id"])                         # 看�
   latin,中文否則整段被丟掉）。至少要兩個關鍵詞重疊才算命中,一個是巧合
 - 客服的門檻是 `--kb-threshold`（預設 0.4,設 0 就關掉）
 - `/ops` 看得到每筆答案、來源、以及**被重用幾次**
+
+### 追問不會被當成答案
+
+真實的 Hermes 常常**反問**(「請提供發票編號」、「是 Stripe 還是 PayPal?」)而不給結論,
+而且 A2A 狀態仍回 `completed`。如果照樣入庫,下一個客戶問類似問題就會被回一串反問。
+
+兩道防線:
+
+1. **agent 自己宣告** `needs_input: true` —— 唯一可靠的訊號。bridge 在遠端狀態是
+   `input-required` / `auth-required` 時自動帶上
+2. **平台的後備啟發式**(`knowledge.looks_like_question()`)—— 最後一行是問號、
+   問句佔多數,或出現「請提供 / please share / 需要幾項」這類索取資訊的片語。
+   bridge 也用同一個函式補 Hermes 回 `completed` 的情況
+
+追問會照樣轉給客戶,但單子狀態變成 **`awaiting_customer`** 而不是 `waiting` ——
+`/ops` 因此分得出「卡在內部」與「等客戶回話」,也多了一個 On customer 篩選鈕。
+
+> 啟發式就是啟發式:`請提供發票編號,我會在退款完成後寄對帳單` 這種「半個答案 +
+> 索取資訊」會被判成追問而不入庫。保守方向是對的(寧可少存),但別當它精準。
 
 > 沒有時效機制:退款政策改了,舊答案還是會被引用。要嘛加 TTL,
 > 要嘛讓人類協作者能在 `/ops` 上把某筆標記為過期——目前兩者都沒有。

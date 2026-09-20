@@ -33,6 +33,7 @@ h1{font-size:19px;margin:0 0 2px}.sub{color:var(--dim);font-size:13px;margin:0 0
 .pill.open{color:var(--cs);border-color:currentColor}
 .pill.waiting{color:var(--warn);border-color:currentColor}
 .pill.resolved{color:var(--dim)}
+.pill.awaiting_customer{color:var(--cust);border-color:currentColor}
 .pill.high{color:var(--warn);border-color:currentColor}
 .pill.human{color:var(--bad);border-color:currentColor}
 .kb{border-left:3px solid var(--int);padding:6px 0 6px 12px;margin:8px 0;
@@ -143,7 +144,8 @@ OPS_PAGE = """<!doctype html>
 <div class="row"><span class="pill" id="tick">—</span>
 <button onclick="only='';load()">All</button>
 <button onclick="only='waiting';load()">Waiting</button>
-<button onclick="only='open';load()">Open</button></div></div>
+<button onclick="only='open';load()">Open</button>
+<button onclick="only='awaiting_customer';load()">On customer</button></div></div>
 <div class="stat" id="stat"></div>
 <div id="kbcard"></div>
 <div id="root"></div></div><script>__SHARED__
@@ -174,12 +176,14 @@ async function load(){
   const reused=kb.entries.reduce((n,e)=>n+e.used,0);
   const tickets=d.rooms.filter(r=>r.kind==='ticket');
   const waiting=tickets.filter(r=>r.status==='waiting');
+  const onCustomer=tickets.filter(r=>r.status==='awaiting_customer');
   const open=tickets.filter(r=>r.status==='open');
   const needHuman=d.rooms.filter(r=>r.needs_human);
   document.getElementById('stat').innerHTML=
    `<div><b>${tickets.length}</b>tickets</div>
     <div><b>${open.length}</b>being served</div>
     <div><b>${waiting.length}</b>waiting on internal</div>
+    <div><b>${onCustomer.length}</b>waiting on customer</div>
     <div><b>${needHuman.length}</b>need a human</div>
     <div><b>${kb.count}</b>answers on file</div>
     <div><b>${reused}</b>reused</div>`;

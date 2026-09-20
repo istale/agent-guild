@@ -227,6 +227,14 @@ async def apologise(client: RoomClient, room_id: str, u: dict) -> None:
 
 
 async def relay_to_customer(client: RoomClient, room_id: str, u: dict) -> None:
+    if u.get("needs_input"):
+        # The team needs more from the customer, so the ticket is not blocked
+        # on us any more — and this exchange is not an answer to keep.
+        await client.say(
+            room_id,
+            f"The team that owns this needs a bit more from you: {u['text']}",
+            status="awaiting_customer")
+        return
     await client.say(room_id,
                      f"Thanks for waiting — here is what we found: {u['text']}",
                      status="open")

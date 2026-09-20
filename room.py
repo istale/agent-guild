@@ -45,8 +45,9 @@ SETTLES = {SAY, NOTICE, ERROR}
 OPEN_CALL = "*"
 
 # Room status, driven by the agents as they work
-OPEN = "open"                      # customer is being served
-WAITING_INTERNAL = "waiting"       # CS agent is blocked on an internal agent
+OPEN = "open"                        # customer is being served
+WAITING_INTERNAL = "waiting"         # blocked on an internal agent
+AWAITING_CUSTOMER = "awaiting_customer"  # blocked on the customer answering
 RESOLVED = "resolved"
 
 SINGLE_WORD_MENTION = re.compile(r"@([A-Za-z0-9_.\-]{2,40})")
@@ -70,6 +71,9 @@ class Utterance:
     text: str
     kind: str = SAY
     to: str = ""                 # optional: name of the agent being addressed
+    # "I cannot answer yet, I need more from whoever asked." Declared by the
+    # agent, because guessing from the text only works some of the time.
+    needs_input: bool = False
     created_at: float = field(default_factory=time.time)
     utterance_id: str = field(default_factory=lambda: new_id("utt"))
 
@@ -78,6 +82,7 @@ class Utterance:
             "seq": self.seq, "id": self.utterance_id, "kind": self.kind,
             "author_did": self.author_did, "author_name": self.author_name,
             "author_owner": self.author_owner, "to": self.to,
+            "needs_input": self.needs_input,
             "text": self.text, "created_at": self.created_at,
         }
 
@@ -198,10 +203,11 @@ class RoomStore:
         return room
 
     def post(self, room_id: str, card: AgentCard, text: str, *, kind: str = SAY,
-             to: str = "", status: str = "", flag_human: bool = False) -> Utterance:
+             to: str = "", status: str = "", flag_human: bool = False,
+             needs_input: bool = False) -> Utterance:
         return self._append(
             room_id, text, kind=kind, to=to, status=status,
-            flag_human=flag_human,
+            flag_human=flag_human, needs_input=needs_input,
             author_did=card.did, author_name=card.name,
             author_owner=(card.owner or {}).get("label", "unknown"))
 
@@ -217,7 +223,7 @@ class RoomStore:
     def _append(self, room_id: str, text: str, *, author_did: str,
                 author_name: str, author_owner: str, kind: str = SAY,
                 to: str = "", status: str = "",
-                flag_human: bool = False) -> Utterance:
+                flag_human: bool = False, needs_input: bool = False) -> Utterance:
         room = self.get(room_id)
         # Only a human's @mention is parsed out of the text. An agent must name
         # its addressee explicitly, because agents quote each other: a relayed
@@ -229,7 +235,7 @@ class RoomStore:
         utterance = Utterance(
             seq=len(room.utterances) + 1, author_did=author_did,
             author_name=author_name, author_owner=author_owner,
-            text=text, kind=kind, to=to,
+            text=text, kind=kind, to=to, needs_input=needs_input,
         )
         room.utterances.append(utterance)
         if status:
@@ -250,6 +256,8 @@ class RoomStore:
         if (utterance.kind != SAY or not utterance.to
                 or utterance.author_owner in ("external", "platform")):
             return
+        if utterance.needs_input:
+            return                      # a follow-up question, not an answer
         ask = next((u for u in reversed(room.utterances[:-1])
                     if u.kind == SAY and u.author_name != utterance.author_name
                     and (u.to == utterance.author_name
@@ -450,7 +458,8 @@ def post_utterance(room_id: str, envelope: dict = Body(...)) -> dict:
     return store.post(room_id, card, text, kind=params.get("kind", SAY),
                       to=params.get("to", ""),
                       status=params.get("status", ""),
-                      flag_human=bool(params.get("flag_human"))).to_dict()
+                      flag_human=bool(params.get("flag_human")),
+                      needs_input=bool(params.get("needs_input"))).to_dict()
 
 
 # ------------------------------------------------------- reading
@@ -571,10 +580,11 @@ class RoomClient:
 
     async def say(self, room_id: str, text: str, *, to: str = "",
                   kind: str = SAY, status: str = "",
-                  flag_human: bool = False) -> dict:
+                  flag_human: bool = False, needs_input: bool = False) -> dict:
         return await self._post(f"/rooms/{room_id}/utterances", "room/post",
                                 {"text": text, "to": to, "kind": kind,
-                                 "status": status, "flag_human": flag_human})
+                                 "status": status, "flag_human": flag_human,
+                                 "needs_input": needs_input})
 
     async def read(self, room_id: str, since: int = 0, wait: float = 0.0,
                    view: str = "full") -> dict:

@@ -49,6 +49,8 @@ from room import ERROR, NOTICE, OPEN_CALL, RoomClient, RoomError
 #   {"text": ..., "kind": "error"}  → tried and failed; settles the ask but is
 #                                     never filed as an answer
 #   {"text": ..., "flag_human": True} → a person needs to look
+#   {"text": ..., "needs_input": True} → this is a follow-up question, so it
+#                                        is relayed but never filed as an answer
 Reply = "str | dict | None"
 Answerer = Callable[[str, dict], "str | dict | None | Awaitable[str | dict | None]"]
 
@@ -235,7 +237,8 @@ class Participant:
                               to=out.get("to", utterance["author_name"]),
                               kind=out.get("kind", "say"),
                               status=out.get("status", ""),
-                              flag_human=bool(out.get("flag_human")))
+                              flag_human=bool(out.get("flag_human")),
+                              needs_input=bool(out.get("needs_input")))
 
     def run(self) -> None:
         """Blocking entry point for a standalone process."""

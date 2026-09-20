@@ -143,6 +143,8 @@ export interface Ctx {
   askedByHuman: string;
   from: "customer" | "agent";
   openCall: boolean;
+  /** The turn we are reacting to was itself a follow-up question. */
+  needsInput: boolean;
 }
 /**
  * A string is said to the room; an object lets you address or escalate it.
@@ -153,6 +155,8 @@ export interface Ctx {
 export type Reply = string | {
   text: string; to?: string; status?: string;
   kind?: "say" | "error" | "notice"; flagHuman?: boolean;
+  /** This reply is a follow-up question: relayed, never filed as an answer. */
+  needsInput?: boolean;
 } | null;
 export type Handler = (ask: string, ctx: Ctx) => Promise<Reply> | Reply;
 
@@ -248,10 +252,12 @@ export class Participant {
   join = (roomId: string) => this.post(`/rooms/${roomId}/join`, "room/join");
 
   say = (roomId: string, text: string,
-         opts: { to?: string; status?: string; kind?: string; flagHuman?: boolean } = {}) =>
+         opts: { to?: string; status?: string; kind?: string;
+                 flagHuman?: boolean; needsInput?: boolean } = {}) =>
     this.post(`/rooms/${roomId}/utterances`, "room/post",
       { text, to: opts.to ?? "", kind: opts.kind ?? "say",
-        status: opts.status ?? "", flag_human: opts.flagHuman ?? false });
+        status: opts.status ?? "", flag_human: opts.flagHuman ?? false,
+        needs_input: opts.needsInput ?? false });
 
   claim = (roomId: string, utteranceId: string) =>
     this.post(`/rooms/${roomId}/openings/${utteranceId}/claim`, "room/claim");
@@ -311,7 +317,8 @@ export class Participant {
     const out = typeof reply === "string" ? { text: reply } : reply;
     await this.join(roomId);
     await this.say(roomId, out.text, {
-      to: out.to, status: out.status, kind: out.kind, flagHuman: out.flagHuman,
+      to: out.to, status: out.status, kind: out.kind,
+      flagHuman: out.flagHuman, needsInput: out.needsInput,
     });
   }
 
@@ -354,6 +361,7 @@ export class Participant {
               roomId, topic: state.topic, customer: state.customer,
               askedBy: u.author_name, askedByHuman: u.author_owner,
               from: external ? "customer" : "agent", openCall: u.to === "*",
+              needsInput: Boolean(u.needs_input),
             }));
           }
         }
@@ -435,6 +443,10 @@ if (process.argv[1]?.endsWith("client.ts")) {
       // An internal agent answered us: pass it on to the customer in the
       // clear (no `to`, so the platform shows it to them) and take the ticket
       // back off "waiting".
+      if (ctx.needsInput) {
+        return { text: `The team needs a bit more from you: ${ask}`,
+                 status: "awaiting_customer" };
+      }
       return {
         text: `Thanks for waiting — here is what we found: ${ask}`,
         status: "open",

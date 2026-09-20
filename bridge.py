@@ -31,6 +31,7 @@ import httpx
 
 from agent_card import Skill
 from connect import Participant
+from knowledge import looks_like_question
 
 
 class A2APeer:
@@ -95,8 +96,8 @@ class A2APeer:
         return out or [Skill("a2a.general", "General help",
                              "an A2A agent that did not list skills")]
 
-    async def ask(self, text: str, context_id: str | None = None) -> str:
-        """Send one A2A message and return the reply as text."""
+    async def ask(self, text: str, context_id: str | None = None) -> dict:
+        """Send one A2A message. Returns {"text", "needs_input"}."""
         rpc = {
             "jsonrpc": "2.0",
             "id": uuid.uuid4().hex[:12],
@@ -123,13 +124,18 @@ class A2APeer:
             # A failed remote task is not an answer: let the caller turn it
             # into an error in the room instead of filing it as knowledge.
             raise RuntimeError(f"remote task {state}: {text[:300]}")
-        return text
+        # Hermes returns `completed` even when its reply is a list of
+        # questions, so the state alone is not enough to tell the two apart.
+        needs_input = state in ASK_STATES or looks_like_question(text)
+        return {"text": text, "needs_input": needs_input}
 
 
 # Hermes answers with protobuf-shaped JSON: the state is an enum name and a
 # text part carries `text` + `mediaType` with no `kind` discriminator at all.
 # Requiring kind == "text" (as the A2A docs' examples show) finds nothing.
 FAILED_STATES = {"failed", "rejected", "canceled", "cancelled", "unknown"}
+# A2A's own way of saying "I need more from you first".
+ASK_STATES = {"input_required", "auth_required"}
 
 
 def task_state(result: dict) -> str:
@@ -222,7 +228,10 @@ async def run_bridge(args: argparse.Namespace) -> None:
                   + (f" for customer {ctx['customer']}" if ctx["customer"] else "")
                   + ":\n")
         try:
-            return await peer.ask(prefix + ask, context_id=ctx["room_id"])
+            answer = await peer.ask(prefix + ask, context_id=ctx["room_id"])
+            if answer["needs_input"]:
+                print("remote is asking for more information")
+            return answer
         except (httpx.HTTPError, RuntimeError) as exc:
             print(f"peer failed: {exc}")
             # Report it as an error, not as an answer: it settles the ask (no
