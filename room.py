@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 import httpx
 from fastapi import APIRouter, Body, HTTPException
 
+import db as database
 import knowledge
 from envelope import new_id, open_envelope, sign_envelope
 from agent_card import AgentCard
@@ -160,8 +161,10 @@ class Room:
 
 class RoomStore:
     def __init__(self, *, claim_ttl: float = 120.0, escalate_after: float = 60.0,
-                 human_after: float = 180.0) -> None:
+                 human_after: float = 180.0,
+                 db: "database.Database | None" = None) -> None:
         self.rooms: dict[str, Room] = {}
+        self.db = db
         # A claim that produces no answer within claim_ttl goes back on the
         # board; an open call nobody takes gets escalated, then flagged for a
         # human. Seconds.
@@ -169,6 +172,46 @@ class RoomStore:
         self.escalate_after = escalate_after
         self.human_after = human_after
         self._changed = asyncio.Event()
+        if db is not None:
+            self._restore(db)
+
+    # ------------------------------------------------------- persistence
+    def _restore(self, db: "database.Database") -> None:
+        """Read the rooms back as they were. The in-memory model stays the
+        working copy; this only rebuilds it."""
+        for row in db.load_rooms():
+            room = Room(
+                room_id=row["room_id"], topic=row["topic"], kind=row["kind"],
+                status=row["status"], priority=row["priority"],
+                needs_human=row["needs_human"], customer=row["customer"],
+                created_by=row["created_by"], created_at=row["created_at"],
+                guest_token=row["guest_token"],
+            )
+            room.participants = {p["did"]: {"did": p["did"], "name": p["name"],
+                                            "owner": p["owner"],
+                                            "joined_at": p["joined_at"]}
+                                 for p in row["participants"]}
+            room.claims = dict(row["claims"])
+            room.utterances = [
+                Utterance(seq=u["seq"], author_did=u["author_did"],
+                          author_name=u["author_name"],
+                          author_owner=u["author_owner"], text=u["text"],
+                          kind=u["kind"], to=u["to_name"],
+                          needs_input=u["needs_input"],
+                          created_at=u["created_at"],
+                          utterance_id=u["utterance_id"])
+                for u in row["utterances"]]
+            self.rooms[room.room_id] = room
+
+    def _save_room(self, room: Room) -> None:
+        if self.db:
+            self.db.save_room({
+                "room_id": room.room_id, "topic": room.topic, "kind": room.kind,
+                "status": room.status, "priority": room.priority,
+                "needs_human": room.needs_human, "customer": room.customer,
+                "created_by": room.created_by, "created_at": room.created_at,
+                "guest_token": room.guest_token,
+            })
 
     def create(self, topic: str, *, room_id: str | None = None,
                created_by: str = "", kind: str = "discussion",
@@ -181,6 +224,7 @@ class RoomStore:
         if kind == "ticket":
             room.guest_token = secrets.token_urlsafe(16)
         self.rooms[room_id] = room
+        self._save_room(room)
         self._wake()
         return room
 
@@ -198,6 +242,8 @@ class RoomStore:
             "owner": (card.owner or {}).get("label", "unknown"),
             "joined_at": time.time(),
         }
+        if self.db:
+            self.db.save_participant(room_id, room.participants[card.did])
         if first_time:
             self.post(room_id, card, f"{card.name} joined the room.", kind=JOIN)
         return room
@@ -242,6 +288,11 @@ class RoomStore:
             room.status = status
         if flag_human:
             room.needs_human, room.priority = True, "high"
+        if self.db:
+            self.db.save_utterance(room_id, utterance.to_dict()
+                                   | {"utterance_id": utterance.utterance_id,
+                                      "author_did": utterance.author_did})
+        self._save_room(room)
         self._file_knowledge(room, utterance)
         self._wake()
         return utterance
@@ -285,6 +336,9 @@ class RoomStore:
         if taken_by and taken_by != card.name:
             raise PermissionError(f"already claimed by {taken_by}")
         room.claims[utterance_id] = {"agent": card.name, "at": time.time()}
+        if self.db:
+            self.db.save_claim(room_id, utterance_id, card.name,
+                               room.claims[utterance_id]["at"])
         if not taken_by:
             self.post(room_id, card, f"{card.name} took this on.", kind=NOTICE)
         return {"room_id": room_id, "utterance_id": utterance_id,
@@ -309,6 +363,8 @@ class RoomStore:
                                    for x in room.utterances)
                     if not answered and now - claim["at"] > self.claim_ttl:
                         del room.claims[u.utterance_id]
+                        if self.db:
+                            self.db.drop_claim(u.utterance_id)
                         notices.append(
                             f"{claim['agent']} claimed this "
                             f"{int(now - claim['at'])}s ago and never answered — "
@@ -317,10 +373,12 @@ class RoomStore:
                 age = now - u.created_at
                 if age > self.human_after and not room.needs_human:
                     room.needs_human, room.priority = True, "high"
+                    self._save_room(room)
                     notices.append(f"No agent has taken this in {int(age)}s — "
                                    "a human needs to look at it.")
                 elif age > self.escalate_after and room.priority == "normal":
                     room.priority = "high"
+                    self._save_room(room)
                     notices.append(f"Still unclaimed after {int(age)}s — "
                                    "priority raised.")
             for text in notices:   # appended after the scan, not during it
@@ -381,6 +439,7 @@ store = RoomStore(
     claim_ttl=_seconds("HUB_CLAIM_TTL", 120.0),
     escalate_after=_seconds("HUB_ESCALATE_AFTER", 60.0),
     human_after=_seconds("HUB_HUMAN_AFTER", 180.0),
+    db=knowledge.store.db,          # one database for the whole platform
 )
 router = APIRouter(tags=["rooms"])
 

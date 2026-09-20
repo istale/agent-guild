@@ -337,11 +337,23 @@ export class Participant {
         for (const ticket of await this.tickets()) {
           const roomId = ticket.room_id as string;
           if (!seen.has(roomId)) {
-            await this.join(roomId);
-            await this.say(roomId,
-              `Hi ${ticket.customer}, ${this.name} here — let me take a look.`,
-              { status: "open" });
-            seen.set(roomId, 0);
+            // Rooms outlive this process: a ticket we have not seen may be one
+            // we were already serving. Resume after our own last turn rather
+            // than replaying the transcript and greeting the customer twice.
+            const history = await this.read(roomId);
+            const ours = (history.utterances as any[])
+              .filter((u) => u.author_name === this.name)
+              .map((u) => u.seq as number);
+            if (ours.length) {
+              seen.set(roomId, Math.max(...ours));
+              console.log(`resuming ${roomId} after my seq ${seen.get(roomId)}`);
+            } else {
+              await this.join(roomId);
+              await this.say(roomId,
+                `Hi ${ticket.customer}, ${this.name} here — let me take a look.`,
+                { status: "open" });
+              seen.set(roomId, 0);
+            }
           }
           const state = await this.read(roomId, seen.get(roomId));
           for (const u of state.utterances) {

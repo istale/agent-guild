@@ -152,11 +152,21 @@ async def serve_tickets(client: RoomClient, card, tickets: list[dict],
     for ticket in tickets:
         room_id = ticket["room_id"]
         if room_id not in seen:
-            await client.join(room_id)
-            await client.say(room_id,
-                             f"Hi {ticket['customer']}, {card.name} here — "
-                             "let me take a look at this.", status="open")
-            seen[room_id] = 0
+            # Rooms outlive this process, so a ticket we have never seen may
+            # still be one we were already serving. Resume after our own last
+            # turn instead of replaying the transcript and greeting twice.
+            history = await client.read(room_id)
+            ours = [u["seq"] for u in history["utterances"]
+                    if u["author_name"] == card.name]
+            if ours:
+                seen[room_id] = max(ours)
+                print(f"resuming {room_id} after my seq {seen[room_id]}")
+            else:
+                await client.join(room_id)
+                await client.say(room_id,
+                                 f"Hi {ticket['customer']}, {card.name} here — "
+                                 "let me take a look at this.", status="open")
+                seen[room_id] = 0
 
         state = await client.read(room_id, since=seen[room_id])
         seen[room_id] = max([u["seq"] for u in state["utterances"]]

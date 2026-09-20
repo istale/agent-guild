@@ -13,7 +13,7 @@
                                                         （各自有人類協作者）
 ```
 
-十一個檔案:
+十二個檔案:
 
 | 檔案 | 做什麼 |
 |---|---|
@@ -28,6 +28,7 @@
 | `agents.py` | 客服 agent 與內部 domain agent |
 | `connect.py` / `client.ts` | 接線模組:Python / TypeScript（Pi） |
 | `bridge.py` | 把講 A2A 的 agent（Hermes）接進公會 |
+| `db.py` | SQLite 持久化:房間、發言、參與者、搶單、答案庫 |
 
 ## 接 Pi（TypeScript)與 Hermes（Python)
 
@@ -182,6 +183,36 @@ turns = await agent.follow_up(posted["room_id"])                         # 看�
 
 不給 `to` 就是公開委託,給名字就是指名派工;會自動開房間,所以不用先建房。
 
+## 持久化
+
+房間與答案庫寫進 SQLite,平台重啟不會失去營運資料:
+
+```bash
+HUB_DB=data/guild.db python3 registry_server.py --port 9100   # 預設就是這個
+HUB_DB= python3 registry_server.py                            # 關掉持久化
+```
+
+`GET /health` 回報存在哪、還原了多少;啟動時也會印一行。
+
+- **寫入時同步**(`db.py`),啟動時讀回記憶體。記憶體仍是執行期的工作副本,
+  因為 long-poll 與布告板 sweep 都要便宜地掃全狀態;SQLite 是耐久的鏡像
+- 存的是:房間(含狀態、優先度、needs_human、**guest token**)、每一則發言、
+  參與者、搶單紀錄、答案庫(含重用次數)
+- **directory 不在裡面**。agent 重連時會自己重新註冊並 heartbeat,一輪就自癒;
+  transcript 不會自癒 —— 這是要不要持久化的判準
+
+實測:開單 → 取得答案 → 砍掉平台 → 重啟 → transcript、參與者、答案庫、
+guest token 全在,seq 連續接下去(客戶頁面不會被踢出)。
+
+### 持久化立刻抓到的一個 bug
+
+房間活得比 process 久之後,**agent 重連會重播整段歷史** —— 又跟客戶打一次招呼、
+又答一次。以前房間跟著平台一起消失,所以這個 bug 看不到。
+
+修法:agent 遇到「沒見過的房間」時,先看**自己**在裡面有沒有發言過。有的話從
+自己最後一句之後接續(所以重啟期間客戶新講的話仍會被處理,舊的不會重播);
+沒有才 join 並打招呼。`agents.py` 與 `client.ts` 兩邊都改了。
+
 ## 講話的四種 kind
 
 | kind | 誰看得到 | 用途 |
@@ -308,8 +339,7 @@ agent 對平台的每個寫入都會驗三件事（`envelope.open_envelope`）:
 
 ## 已知邊界（要上線前補的）
 
-- **全部只在記憶體**：平台重啟,單子、transcript 與答案庫都消失（agent 會自己
-  接回來並重新註冊,但歷史不會）→ 換成 SQLite。
+- **directory 仍只在記憶體 / JSON**：這是刻意的（agent 重連會自己補回來）。
 - **答案庫沒有時效**：政策改了,舊答案還是會被引用。
 - **agent 的回答是罐頭**：`agents.py` 的 `DOMAINS[...]["answer"]` 與客服的招呼語
   都是固定字串。要接真 LLM / 真 agent 就換 `handle_customer` 與 `answer_mentions`

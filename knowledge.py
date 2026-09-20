@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 
 from fastapi import APIRouter, HTTPException
 
+import db as database
 from directory import tokenize
 from envelope import new_id
 
@@ -124,10 +125,20 @@ class Match:
 
 
 class KnowledgeBase:
-    def __init__(self, *, min_overlap: int = 2):
+    def __init__(self, *, min_overlap: int = 2,
+                 db: "database.Database | None" = None):
         self.entries: dict[str, Entry] = {}
         # One shared word ("invoice") is a coincidence; two is a lead.
         self.min_overlap = min_overlap
+        self.db = db
+        if db is not None:
+            for row in db.load_entries():
+                entry = Entry(question=row["question"], answer=row["answer"],
+                              by_agent=row["by_agent"], by_human=row["by_human"],
+                              room_id=row["room_id"],
+                              entry_id=row["entry_id"],
+                              created_at=row["created_at"], used=row["used"])
+                self.entries[entry.entry_id] = entry
 
     def record(self, *, question: str, answer: str, by_agent: str,
                by_human: str, room_id: str) -> Entry | None:
@@ -145,6 +156,8 @@ class KnowledgeBase:
         entry = Entry(question=question, answer=answer, by_agent=by_agent,
                       by_human=by_human, room_id=room_id)
         self.entries[entry.entry_id] = entry
+        if self.db:
+            self.db.save_entry(entry.to_dict())
         return entry
 
     def search(self, query: str, limit: int = 5) -> list[Match]:
@@ -166,13 +179,15 @@ class KnowledgeBase:
     def mark_used(self, entry_id: str) -> Entry:
         entry = self.entries[entry_id]
         entry.used += 1
+        if self.db:
+            self.db.save_entry(entry.to_dict())
         return entry
 
     def list(self) -> list[Entry]:
         return sorted(self.entries.values(), key=lambda e: -e.created_at)
 
 
-store = KnowledgeBase()
+store = KnowledgeBase(db=database.open_default())
 router = APIRouter(prefix="/knowledge", tags=["knowledge"])
 
 

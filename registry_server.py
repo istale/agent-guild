@@ -36,6 +36,29 @@ app.include_router(room.router)
 app.include_router(knowledge.router)
 
 
+@app.on_event("startup")
+def _announce_storage() -> None:
+    db = room.store.db
+    if db is None:
+        print("storage: in memory only (HUB_DB is unset or :memory:)")
+        return
+    print(f"storage: {db.path}")
+    print(f"restored: {len(room.store.rooms)} room(s), "
+          f"{len(knowledge.store.entries)} answer(s) on file")
+
+
+@app.get("/health")
+def health() -> dict:
+    """What survived, and where it is kept."""
+    db = room.store.db
+    return {
+        "storage": db.path if db else None,
+        "rooms": len(room.store.rooms),
+        "knowledge": len(knowledge.store.entries),
+        "rows": db.counts() if db else None,
+    }
+
+
 @app.get("/", include_in_schema=False)
 def home() -> RedirectResponse:
     return RedirectResponse("/ops")
