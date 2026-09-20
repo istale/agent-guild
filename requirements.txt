@@ -1,0 +1,7 @@
+fastapi>=0.110
+uvicorn>=0.27
+httpx>=0.26
+cryptography>=42
+
+# client.ts (the Pi side) needs Node 22+ and no npm packages:
+#   node --experimental-strip-types client.ts --name "Pi Agent" --owner Kevin

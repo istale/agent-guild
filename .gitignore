@@ -1,0 +1,12 @@
+# Agent identities and platform state — private per machine, never shared.
+data/
+
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+node_modules/
+*.tsbuildinfo
+
+.DS_Store
