@@ -178,18 +178,41 @@ async def serve_tickets(client: RoomClient, card, tickets: list[dict],
             if u["kind"] != "say":
                 continue
             if u["author_owner"] == "external":
-                await handle_customer(client, room_id, card, u, args)
+                await handle_customer(client, room_id, card, u, args,
+                                      engaged=engaged_agent(state, card.name))
             elif u["to"] == card.name:
                 await relay_to_customer(client, room_id, u)
 
 
+def engaged_agent(state: dict, my_name: str) -> str:
+    """Who is already working this ticket, if anyone.
+
+    A follow-up belongs to the agent already on the case. Routing it through
+    the directory again treats it as a fresh problem, and a question like
+    "which depot did you say?" has none of the keywords that got it routed the
+    first time — it ends up on the board and nobody claims it.
+    """
+    others = [p for p in state.get("participants", [])
+              if p.get("name") != my_name]
+    if not others:
+        return ""
+    return max(others, key=lambda p: p.get("joined_at", 0))["name"]
+
+
 async def handle_customer(client: RoomClient, room_id: str, card, u: dict,
-                          args: argparse.Namespace) -> None:
+                          args: argparse.Namespace, engaged: str = "") -> None:
     text = u["text"]
     if any(word in text.lower() for word in ("thanks", "thank you", "謝謝")):
         await client.say(room_id, "Glad that helped. I will close this ticket.",
                          status="resolved")
         return
+    if engaged:
+        # Back to whoever is on the case, with no fresh routing.
+        await client.say(
+            room_id, f"@{engaged} {u['author_name']} follows up: “{text}”",
+            to=engaged, status="waiting")
+        return
+
     known = await recall(args.platform, text, args.kb_threshold)
     if known:
         # Answer from the log and say where it came from, so /ops can tell a

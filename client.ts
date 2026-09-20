@@ -145,6 +145,8 @@ export interface Ctx {
   openCall: boolean;
   /** The turn we are reacting to was itself a follow-up question. */
   needsInput: boolean;
+  /** An agent already working this room, if any — send follow-ups to them. */
+  engaged: string;
 }
 /**
  * A string is said to the room; an object lets you address or escalate it.
@@ -368,12 +370,19 @@ export class Participant {
             }
             if (u.kind !== "say") continue;
             const external = u.author_owner === "external";
+            // Who is already on this ticket: a follow-up goes back to them
+            // rather than through the directory as if it were a new problem.
+            const others = (state.participants as any[] ?? [])
+              .filter((p) => p.name !== this.name);
+            const engaged = others.length
+              ? others.reduce((a, b) => (a.joined_at > b.joined_at ? a : b)).name
+              : "";
             if (!external && u.to !== this.name) continue;
             await this.speak(roomId, await handler(u.text, {
               roomId, topic: state.topic, customer: state.customer,
               askedBy: u.author_name, askedByHuman: u.author_owner,
               from: external ? "customer" : "agent", openCall: u.to === "*",
-              needsInput: Boolean(u.needs_input),
+              needsInput: Boolean(u.needs_input), engaged,
             }));
           }
         }
@@ -466,6 +475,10 @@ if (process.argv[1]?.endsWith("client.ts")) {
     }
     if (/thank|謝/i.test(ask)) {
       return { text: "Glad that helped. Closing this ticket.", status: "resolved" };
+    }
+    if (ctx.engaged) {
+      return { text: `@${ctx.engaged} ${ctx.askedBy} follows up: “${ask}”`,
+               to: ctx.engaged, status: "waiting" };
     }
     const known = await pi.recall(ask);        // ← solved before?
     if (known) {
